@@ -1,0 +1,6 @@
+{
+  "name": "SKP VPN",
+  "description": "One-tap VPN client featuring automatic optimal server selection, global proxy locations, live throughput telemetry, split tunneling, and built-in speed diagnostics.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
