@@ -1,0 +1,258 @@
+name: Build and Release Debug APK
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-apk:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Temurin Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: Verify Java environment
+        shell: bash
+        run: |
+          set -euo pipefail
+          java -version
+          echo "JAVA_HOME=${JAVA_HOME:-}"
+          if [ -z "${JAVA_HOME:-}" ]; then
+            echo "ERROR: JAVA_HOME is not set."
+            exit 1
+          fi
+          JAVA_VER_LINE=$(java -version 2>&1 | head -n 1)
+          JAVA_MAJOR=$(echo "$JAVA_VER_LINE" | sed -E 's/.*version "([0-9]+).*/\1/')
+          if ! [[ "$JAVA_MAJOR" =~ ^[0-9]+$ ]]; then
+            echo "ERROR: Could not detect active Java major version from: $JAVA_VER_LINE"
+            exit 1
+          fi
+          echo "Detected Java major version: $JAVA_MAJOR"
+          if [ "$JAVA_MAJOR" -lt 17 ]; then
+            echo "ERROR: Active Java version ($JAVA_MAJOR) is lower than 17."
+            exit 1
+          fi
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Set up Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Build Web App and Generate Android Project
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm install --legacy-peer-deps
+          npm run build
+
+          npm install --no-save --legacy-peer-deps \
+            @capacitor/core@6.2.0 \
+            @capacitor/cli@6.2.0 \
+            @capacitor/android@6.2.0 \
+            @capacitor/assets@3.0.5
+
+          if [ ! -d "android" ]; then
+            npx cap add android
+          fi
+
+          npx cap sync android
+
+          if [ -f "public/pwa-512x512.png" ]; then
+            mkdir -p assets
+            cp public/pwa-512x512.png assets/icon-only.png
+            cp public/pwa-512x512.png assets/icon-foreground.png
+            cp public/pwa-512x512.png assets/splash.png
+            npx capacitor-assets generate --android \
+              --iconBackgroundColor '#0B5D32' \
+              --iconBackgroundColorDark '#0B5D32' \
+              --splashBackgroundColor '#147A42' \
+              --splashBackgroundColorDark '#0B5D32' || true
+          fi
+
+      - name: Create temporary debug keystore
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ ! -f "./debug.keystore" ]; then
+            "${JAVA_HOME}/bin/keytool" -genkeypair \
+              -v \
+              -keystore ./debug.keystore \
+              -storepass android \
+              -alias androiddebugkey \
+              -keypass android \
+              -keyalg RSA \
+              -keysize 2048 \
+              -validity 10000 \
+              -dname "CN=Android Debug,O=Android,C=US" >/dev/null 2>&1
+          fi
+
+          if [ ! -f "./debug.keystore" ]; then
+            echo "ERROR: Failed to create ./debug.keystore"
+            exit 1
+          fi
+
+          mkdir -p "${HOME}/.android"
+          cp ./debug.keystore "${HOME}/.android/debug.keystore"
+
+      - name: Build debug APK
+        shell: bash
+        run: |
+          set -euo pipefail
+          chmod +x android/gradlew
+          (
+            cd android
+            ./gradlew :app:assembleDebug --stacktrace --no-daemon
+          )
+          mkdir -p app/build/outputs/apk/debug
+          if [ -f "android/app/build/outputs/apk/debug/app-debug.apk" ]; then
+            cp "android/app/build/outputs/apk/debug/app-debug.apk" "app/build/outputs/apk/debug/app-debug.apk"
+          fi
+
+      - name: Verify debug APK
+        shell: bash
+        run: |
+          set -euo pipefail
+          EXPECTED_APK="app/build/outputs/apk/debug/app-debug.apk"
+
+          if [ ! -f "$EXPECTED_APK" ]; then
+            echo "ERROR: Expected APK not found at $EXPECTED_APK"
+            if [ -d "android/app/build/outputs/apk" ]; then
+              echo "Discovered APKs inside android/app/build/outputs/apk:"
+              find android/app/build/outputs/apk -type f -name "*.apk" || true
+            fi
+            exit 1
+          fi
+
+          if [ ! -s "$EXPECTED_APK" ]; then
+            echo "ERROR: APK file at $EXPECTED_APK is empty."
+            exit 1
+          fi
+
+          case "$EXPECTED_APK" in
+            *.apk) ;;
+            *)
+              echo "ERROR: File does not have .apk extension: $EXPECTED_APK"
+              exit 1
+              ;;
+          esac
+
+          echo "Verified debug APK: $EXPECTED_APK ($(wc -c < "$EXPECTED_APK") bytes)"
+
+      - name: Upload debug APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: app-debug-apk
+          path: app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error
+
+      - name: Prepare APK release asset
+        id: prepare_asset
+        shell: bash
+        run: |
+          set -euo pipefail
+          RELEASE_DIR="${RUNNER_TEMP}/skp-vpn-release-asset"
+          rm -rf "$RELEASE_DIR"
+          mkdir -p "$RELEASE_DIR"
+
+          cp "app/build/outputs/apk/debug/app-debug.apk" "${RELEASE_DIR}/app-debug.apk"
+
+          if [ ! -s "${RELEASE_DIR}/app-debug.apk" ]; then
+            echo "ERROR: Prepared release asset is missing or empty."
+            exit 1
+          fi
+
+          echo "apk_path=${RELEASE_DIR}/app-debug.apk" >> "$GITHUB_OUTPUT"
+
+      - name: Publish APK to GitHub Releases
+        id: publish_release
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh --version
+
+          APK_PATH="${{ steps.prepare_asset.outputs.apk_path }}"
+          if [ ! -f "$APK_PATH" ] || [ ! -s "$APK_PATH" ]; then
+            echo "ERROR: Prepared APK does not exist or is empty: $APK_PATH"
+            exit 1
+          fi
+
+          APK_BASENAME="$(basename "$APK_PATH")"
+          if [ "$APK_BASENAME" != "app-debug.apk" ]; then
+            echo "ERROR: Release asset filename must be exactly app-debug.apk, got: $APK_BASENAME"
+            exit 1
+          fi
+
+          RELEASE_TAG="debug-apk-build-${GITHUB_RUN_NUMBER}-${GITHUB_RUN_ATTEMPT}"
+          RELEASE_TITLE="Debug APK Build #${GITHUB_RUN_NUMBER}"
+
+          RELEASE_NOTES=$(cat <<EOF
+          Automatically generated debug APK for **SKP VPN** built by GitHub Actions.
+
+          - **Workflow Run Number:** ${GITHUB_RUN_NUMBER}
+          - **Workflow Run Attempt:** ${GITHUB_RUN_ATTEMPT}
+          - **Source Commit SHA:** ${GITHUB_SHA}
+          - **Purpose:** Intended for testing and direct installation only (not a Play Store production release).
+          - **Signing:** Signed with a temporary debug keystore.
+          EOF
+          )
+
+          gh release create "$RELEASE_TAG" "$APK_PATH" \
+            --title "$RELEASE_TITLE" \
+            --notes "$RELEASE_NOTES" \
+            --target "$GITHUB_SHA" \
+            --latest
+
+      - name: Report APK download result
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          RELEASE_OUTCOME="${{ steps.publish_release.outcome }}"
+          RELEASE_TAG="debug-apk-build-${GITHUB_RUN_NUMBER}-${GITHUB_RUN_ATTEMPT}"
+          RELEASE_TITLE="Debug APK Build #${GITHUB_RUN_NUMBER}"
+          DIRECT_URL="https://github.com/${GITHUB_REPOSITORY}/releases/latest/download/app-debug.apk"
+
+          if [ "$RELEASE_OUTCOME" = "success" ]; then
+            RELEASE_PAGE_URL=$(gh release view "$RELEASE_TAG" --json url -q .url)
+            echo "Release Tag: $RELEASE_TAG"
+            echo "Release Title: $RELEASE_TITLE"
+            echo "Release Page: $RELEASE_PAGE_URL"
+            echo "APK Filename: app-debug.apk"
+            echo "DIRECT APK DOWNLOAD: $DIRECT_URL"
+
+            {
+              echo "### DIRECT APK DOWNLOAD"
+              echo ""
+              echo "$DIRECT_URL"
+              echo ""
+              echo "- **Release Tag:** \`$RELEASE_TAG\`"
+              echo "- **Release Title:** $RELEASE_TITLE"
+              echo "- **APK Asset:** \`app-debug.apk\`"
+              echo "- **Backup Artifact:** The GitHub Actions artifact \`app-debug-apk\` remains available on this workflow run."
+            } >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "WARNING: Publishing to GitHub Releases did not succeed."
+            if [ -f "app/build/outputs/apk/debug/app-debug.apk" ]; then
+              echo "The debug APK build succeeded, and the backup Actions artifact 'app-debug-apk' remains available."
+            fi
+          fi
