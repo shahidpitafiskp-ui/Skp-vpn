@@ -1,0 +1,13 @@
+{
+  "appId": "com.skpvpn.android",
+  "appName": "SKP VPN",
+  "webDir": "dist",
+  "bundledWebRuntime": false,
+  "server": {
+    "androidScheme": "https"
+  },
+  "android": {
+    "backgroundColor": "#147A42",
+    "allowMixedContent": false
+  }
+}

@@ -121,8 +121,8 @@ export default function App() {
 
   // Live session timer & throughput telemetry
   const [sessionSeconds, setSessionSeconds] = useState<number>(854);
-  const [downSpeedMbps, setDownSpeedMbps] = useState<number>(52.4);
-  const [upSpeedMbps, setUpSpeedMbps] = useState<number>(21.8);
+  const [downSpeedMbps, setDownSpeedMbps] = useState<number>(56.4);
+  const [upSpeedMbps, setUpSpeedMbps] = useState<number>(23.8);
   const [lastSpeedTest, setLastSpeedTest] = useState<SpeedTestMetrics | null>(
     null
   );
@@ -409,7 +409,7 @@ export default function App() {
     }
 
     const loadBonus = Math.round((100 - selectedServer.loadPercent) * 0.45);
-    const baseDown = 46.2 + loadBonus;
+    const baseDown = 48.2 + loadBonus;
     const baseUp = Number((baseDown * 0.42).toFixed(1));
     setDownSpeedMbps(baseDown);
     setUpSpeedMbps(baseUp);
@@ -504,7 +504,7 @@ export default function App() {
       dir={language === 'ur' ? 'rtl' : 'ltr'}
       className="min-h-screen bg-[#147A42] text-slate-900 flex flex-col"
     >
-      {/* Desktop Top Bar (3-zone contract on cohesive Deep Forest Green) */}
+      {/* Desktop Top Bar (3-zone contract) */}
       <header className="hidden lg:flex items-center justify-between gap-8 px-8 py-3.5 bg-[#0B5D32] text-white border-b border-white/15">
         <div className="text-lg font-bold tracking-tight text-white whitespace-nowrap shrink-0">
           SKP VPN
@@ -555,7 +555,7 @@ export default function App() {
       {/* Main Responsive Workspace on Vibrant Green Background */}
       <main className="flex-1 w-full max-w-6xl mx-auto lg:px-8 lg:py-7">
         <div className="grid grid-cols-1 lg:grid-cols-12 lg:gap-8 items-start">
-          {/* LEFT / PRIMARY COLUMN: SKP VPN Mobile-First Interface on Green Canvas */}
+          {/* LEFT / PRIMARY COLUMN: SKP VPN Mobile-First Interface */}
           <section className="lg:col-span-5 w-full bg-[#116938] lg:rounded-2xl lg:overflow-hidden lg:border lg:border-white/15 lg:shadow-md">
             {/* SKP VPN Deep Emerald Top Bar (#0B5D32) */}
             <div
@@ -593,7 +593,7 @@ export default function App() {
                   title="Fast Internet Speed Check"
                   className="min-w-[44px] min-h-[44px] rounded-full flex items-center justify-center hover:bg-white/15 active:bg-white/20 transition-colors cursor-pointer"
                 >
-                  <Gauge className="w-[23px] h-[23px] text-white" strokeWidth={2.1} />
+                  <Gauge className="w-[22px] h-[22px] text-white" strokeWidth={2.1} />
                 </button>
 
                 <button
@@ -955,7 +955,7 @@ export default function App() {
               )}
             </div>
 
-            {/* All Free Unlocked Global Proxy Nodes */}
+            {/* All Free Unlocked Global Proxy Nodes (Featuring Pakistan Karachi & Islamabad) */}
             <div className="bg-white rounded-2xl shadow-sm p-6">
               <div className="flex items-center justify-between mb-4">
                 <div>
@@ -963,8 +963,8 @@ export default function App() {
                     Free Global Proxy Nodes
                   </h2>
                   <p className="text-xs text-slate-500">
-                    All high-speed locations are unlocked with zero subscription
-                    limits
+                    Includes Pakistan (Karachi &amp; Islamabad) &amp; global
+                    locations — 100% free
                   </p>
                 </div>
                 <span className="text-xs text-slate-500 font-mono-tabular">

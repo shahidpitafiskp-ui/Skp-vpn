@@ -44,7 +44,7 @@ export const ServerListContent: React.FC<ServerListContentProps> = ({
   const tabs: Array<{ key: 'all' | 'fastest' | 'asia_me' | 'europe_us'; label: string }> = [
     { key: 'all', label: language === 'ur' ? 'تمام' : 'All' },
     { key: 'fastest', label: language === 'ur' ? 'تیز ترین' : 'Fastest' },
-    { key: 'asia_me', label: language === 'ur' ? 'ایشیا / دبئی' : 'Asia & ME' },
+    { key: 'asia_me', label: language === 'ur' ? 'پاکستان / ایشیا' : 'PK & Asia' },
     { key: 'europe_us', label: language === 'ur' ? 'یورپ / امریکہ' : 'EU & US' },
   ];
 

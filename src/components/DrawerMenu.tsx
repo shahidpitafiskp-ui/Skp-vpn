@@ -164,7 +164,7 @@ export const DrawerMenu: React.FC<DrawerMenuProps> = ({
             </button>
           </div>
 
-          {/* Recovery & Protection Toggles (Auto-Reconnect + Kill Switch) */}
+          {/* Recovery & Protection Toggles */}
           <div className="space-y-4 border-t border-slate-100 pt-5">
             <div className="flex items-center justify-between gap-3">
               <div className="min-w-0">

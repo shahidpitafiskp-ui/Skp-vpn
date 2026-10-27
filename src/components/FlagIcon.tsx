@@ -22,6 +22,19 @@ export const FlagIcon: React.FC<FlagIconProps> = ({ countryCode, size = 'md' }) 
 
   const renderSvgFlag = () => {
     switch (countryCode) {
+      case 'PK':
+        return (
+          <svg viewBox="0 0 36 36" className="w-full h-full object-cover">
+            <rect width="36" height="36" fill="#01411C" />
+            <rect width="9" height="36" fill="#FFFFFF" />
+            <circle cx="22.5" cy="18" r="7.2" fill="#FFFFFF" />
+            <circle cx="24.5" cy="16.3" r="6.4" fill="#01411C" />
+            <polygon
+              points="26.2,11.8 27.1,14.3 29.7,14.3 27.6,15.8 28.4,18.3 26.2,16.8 24.0,18.3 24.8,15.8 22.7,14.3 25.3,14.3"
+              fill="#FFFFFF"
+            />
+          </svg>
+        );
       case 'US':
         return (
           <svg viewBox="0 0 36 36" className="w-full h-full object-cover">
@@ -122,7 +135,7 @@ export const FlagIcon: React.FC<FlagIconProps> = ({ countryCode, size = 'md' }) 
         );
       default:
         return (
-          <div className="w-full h-full bg-sky-600 text-white text-xs font-bold flex items-center justify-center">
+          <div className="w-full h-full bg-emerald-700 text-white text-xs font-bold flex items-center justify-center">
             {countryCode}
           </div>
         );
