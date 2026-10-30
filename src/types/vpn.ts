@@ -71,6 +71,7 @@ export interface NativeVpnEventPayload {
   downMbps?: number;
   upMbps?: number;
   durationSec?: number;
+  connectedSinceMs?: number;
   otaStatus?:
     | 'idle'
     | 'checking'

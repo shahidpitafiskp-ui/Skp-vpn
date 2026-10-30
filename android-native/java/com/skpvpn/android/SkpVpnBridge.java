@@ -195,7 +195,11 @@ public class SkpVpnBridge {
             if (sharedBackend.getState(sharedTunnel) == Tunnel.State.UP) {
                 currentState = "CONNECTED";
                 if (connectedSinceMs == 0L) {
-                    connectedSinceMs = System.currentTimeMillis();
+                    SharedPreferences prefs = appContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE);
+                    long savedSince = prefs.getLong("wg_connected_since_ms", 0L);
+                    connectedSinceMs = (savedSince > 0L && savedSince <= System.currentTimeMillis())
+                        ? savedSince
+                        : System.currentTimeMillis();
                 }
             }
         } catch (Throwable t) {
@@ -793,12 +797,21 @@ public class SkpVpnBridge {
         fileOrDir.delete();
     }
 
+    private void saveConnectedSinceMs(long timestampMs) {
+        try {
+            SharedPreferences prefs = appContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE);
+            prefs.edit().putLong("wg_connected_since_ms", timestampMs).apply();
+        } catch (Exception ignored) {
+        }
+    }
+
     private void handleBackendStateChange(Tunnel.State newState) {
         if (newState == Tunnel.State.DOWN && !connectingInProgress) {
             if ("CONNECTED".equals(currentState)) {
                 currentState = "DISCONNECTED";
                 statusDetail = "";
                 connectedSinceMs = 0L;
+                saveConnectedSinceMs(0L);
                 currentDownMbps = 0.0;
                 currentUpMbps = 0.0;
                 cancelStatusNotification();
@@ -898,6 +911,7 @@ public class SkpVpnBridge {
                     warpVerified = false;
                     activeEndpoint = "";
                     connectedSinceMs = 0L;
+                    saveConnectedSinceMs(0L);
                     currentDownMbps = 0.0;
                     currentUpMbps = 0.0;
                     cancelStatusNotification();
@@ -1062,6 +1076,7 @@ public class SkpVpnBridge {
                 lastTxBytes = initialStats != null ? initialStats.totalTx() : 0L;
                 lastSampleTimeMs = System.currentTimeMillis();
                 connectedSinceMs = System.currentTimeMillis();
+                saveConnectedSinceMs(connectedSinceMs);
                 currentDownMbps = 0.0;
                 currentUpMbps = 0.0;
                 connectingInProgress = false;
@@ -1393,6 +1408,7 @@ public class SkpVpnBridge {
                 if (!connectingInProgress) {
                     currentState = "DISCONNECTED";
                     connectedSinceMs = 0L;
+                    saveConnectedSinceMs(0L);
                     currentDownMbps = 0.0;
                     currentUpMbps = 0.0;
                     cancelStatusNotification();
@@ -1464,6 +1480,7 @@ public class SkpVpnBridge {
                 ? Math.max(0L, (System.currentTimeMillis() - connectedSinceMs) / 1000L)
                 : 0L;
             obj.put("durationSec", durSec);
+            obj.put("connectedSinceMs", "CONNECTED".equals(currentState) ? connectedSinceMs : 0L);
             return obj.toString();
         } catch (Exception e) {
             return "{\"state\":\"DISCONNECTED\"}";
@@ -1504,10 +1521,15 @@ public class SkpVpnBridge {
                 ? new Notification.Builder(appContext, CHANNEL_ID)
                 : new Notification.Builder(appContext);
 
+            long whenMs = connectedSinceMs > 0L ? connectedSinceMs : System.currentTimeMillis();
+
             Notification notification = builder
                 .setContentTitle("SKP VPN Connected")
                 .setContentText("Encrypted WireGuard Tunnel Active (" + serverName + ")")
                 .setSmallIcon(android.R.drawable.ic_lock_lock)
+                .setWhen(whenMs)
+                .setShowWhen(true)
+                .setUsesChronometer(true)
                 .setOngoing(true)
                 .setContentIntent(pendingIntent)
                 .build();

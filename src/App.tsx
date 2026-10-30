@@ -322,6 +322,7 @@ export default function App() {
 
   // Live session timer, session time-limit warning, & throughput telemetry
   const [sessionSeconds, setSessionSeconds] = useState<number>(0);
+  const [connectedSinceMs, setConnectedSinceMs] = useState<number>(0);
   const [webSessionBytes, setWebSessionBytes] = useState<number>(0);
   const [downSpeedMbps, setDownSpeedMbps] = useState<number>(0);
   const [upSpeedMbps, setUpSpeedMbps] = useState<number>(0);
@@ -498,8 +499,22 @@ export default function App() {
 
       if (payload.state === 'CONNECTED') {
         setStatus(ConnectionStatus.Connected);
-        if (typeof payload.durationSec === 'number') {
+        if (
+          typeof payload.connectedSinceMs === 'number' &&
+          payload.connectedSinceMs > 0
+        ) {
+          setConnectedSinceMs(payload.connectedSinceMs);
+          setSessionSeconds(
+            Math.max(
+              0,
+              Math.floor((Date.now() - payload.connectedSinceMs) / 1000)
+            )
+          );
+        } else if (typeof payload.durationSec === 'number') {
           setSessionSeconds(payload.durationSec);
+          setConnectedSinceMs((prev) =>
+            prev > 0 ? prev : Date.now() - payload.durationSec! * 1000
+          );
         }
         if (typeof payload.downMbps === 'number') {
           setDownSpeedMbps(payload.downMbps);
@@ -516,6 +531,7 @@ export default function App() {
         setDownSpeedMbps(0);
         setUpSpeedMbps(0);
         setSessionSeconds(0);
+        setConnectedSinceMs(0);
       }
     },
     [saveLastUsedServer]
@@ -838,6 +854,23 @@ export default function App() {
     };
   }, [status, handleConnectionDropDetected, handleRetryReconnectNow]);
 
+  // Smooth 1-second local clock sync in Native Android mode so HH:MM:SS never skips ticks
+  useEffect(() => {
+    if (!nativeMode || status !== ConnectionStatus.Connected) return;
+
+    const timer = window.setInterval(() => {
+      if (connectedSinceMs > 0) {
+        setSessionSeconds(
+          Math.max(0, Math.floor((Date.now() - connectedSinceMs) / 1000))
+        );
+      } else {
+        setSessionSeconds((prev) => prev + 1);
+      }
+    }, 1000);
+
+    return () => window.clearInterval(timer);
+  }, [nativeMode, status, connectedSinceMs]);
+
   // Web preview telemetry timer (native Android pushes real WireGuard telemetry instead)
   useEffect(() => {
     if (nativeMode) return;
@@ -847,9 +880,12 @@ export default function App() {
       setUpSpeedMbps(0);
       if (status === ConnectionStatus.Disconnected) {
         setWebSessionBytes(0);
+        setConnectedSinceMs(0);
       }
       return;
     }
+
+    setConnectedSinceMs((prev) => (prev > 0 ? prev : Date.now()));
 
     const loadBonus = Math.round((100 - displayedServer.loadPercent) * 0.45);
     const baseDown = 48.2 + loadBonus;
@@ -1028,6 +1064,7 @@ export default function App() {
       setStatus(ConnectionStatus.Connecting);
       transitionTimerRef.current = window.setTimeout(() => {
         setSessionSeconds(0);
+        setConnectedSinceMs(Date.now());
         if (srv.id === 'auto') {
           setAutoResolvedServer(pickOptimalConcreteServer());
         }
@@ -1367,9 +1404,48 @@ export default function App() {
                   />
                 </button>
 
+                {/* Prominent VPN Connection Time Readout */}
+                <div className="mt-3 mb-0.5 flex flex-col items-center">
+                  <div className="flex items-center gap-1.5 text-[11.5px] font-medium text-slate-500 dark:text-slate-400">
+                    <Clock className="w-3.5 h-3.5 text-[#15803D] dark:text-emerald-400 shrink-0" />
+                    <span className={language === 'ur' ? 'font-urdu' : ''}>
+                      {language === 'ur'
+                        ? 'کنیکشن کا وقت (Connection Time)'
+                        : 'VPN Connection Time'}
+                    </span>
+                    {status === ConnectionStatus.Connected &&
+                      connectedSinceMs > 0 && (
+                        <>
+                          <span aria-hidden="true">·</span>
+                          <span className="font-mono-tabular">
+                            {new Date(connectedSinceMs).toLocaleTimeString([], {
+                              hour: '2-digit',
+                              minute: '2-digit',
+                            })}
+                          </span>
+                        </>
+                      )}
+                  </div>
+
+                  <div
+                    aria-live="off"
+                    className={`mt-0.5 text-[28px] sm:text-[30px] leading-tight font-bold font-mono-tabular font-mono-3d tracking-wider ${
+                      status === ConnectionStatus.Connected
+                        ? isSessionOverLimit
+                          ? 'text-amber-600 dark:text-amber-400'
+                          : 'text-[#15803D] dark:text-emerald-400'
+                        : 'text-slate-400 dark:text-slate-500'
+                    }`}
+                  >
+                    {formatDuration(
+                      status === ConnectionStatus.Connected ? sessionSeconds : 0
+                    )}
+                  </div>
+                </div>
+
                 {/* Connection Status Text */}
                 <div
-                  className={`mt-4 mb-1 text-[16px] font-medium text-center font-mono-tabular px-2 ${
+                  className={`mt-1.5 mb-1 text-[15px] font-medium text-center font-mono-tabular px-2 ${
                     status === ConnectionStatus.Connected
                       ? 'text-[#15803D] dark:text-emerald-400'
                       : status === ConnectionStatus.Reconnecting
@@ -1395,52 +1471,14 @@ export default function App() {
                   darkMode={darkMode}
                 />
 
-                {/* Quiet Unboxed Live Session or Reconnect Telemetry */}
+                {/* Quiet Unboxed Live Throughput or Reconnect Telemetry */}
                 <div className="mt-2 min-h-[24px] flex flex-wrap items-center justify-center gap-2 text-xs text-slate-500 dark:text-slate-400 font-mono-tabular text-center">
                   {status === ConnectionStatus.Connected ? (
                     nativeMode ? (
                       <>
-                        <span
-                          className={
-                            isSessionOverLimit
-                              ? 'text-amber-600 dark:text-amber-400 font-semibold'
-                              : ''
-                          }
-                        >
-                          {formatDuration(sessionSeconds)}
-                        </span>
-                        {sessionAlert.enabled && (
-                          <>
-                            <span aria-hidden="true">·</span>
-                            <button
-                              type="button"
-                              onClick={() => setDrawerOpen(true)}
-                              className={`hover:underline cursor-pointer ${
-                                isSessionOverLimit
-                                  ? 'text-amber-600 dark:text-amber-400 font-semibold'
-                                  : ''
-                              }`}
-                            >
-                              Limit {Math.round(effectiveLimitSeconds / 60)}m
-                            </button>
-                          </>
-                        )}
-                        <span aria-hidden="true">·</span>
                         <span>↓ {formatBytesCompact(nativeRxBytes)}</span>
                         <span aria-hidden="true">·</span>
                         <span>↑ {formatBytesCompact(nativeTxBytes)}</span>
-                      </>
-                    ) : (
-                      <>
-                        <span
-                          className={
-                            isSessionOverLimit
-                              ? 'text-amber-600 dark:text-amber-400 font-semibold'
-                              : ''
-                          }
-                        >
-                          {formatDuration(sessionSeconds)}
-                        </span>
                         {sessionAlert.enabled && (
                           <>
                             <span aria-hidden="true">·</span>
@@ -1457,10 +1495,28 @@ export default function App() {
                             </button>
                           </>
                         )}
-                        <span aria-hidden="true">·</span>
+                      </>
+                    ) : (
+                      <>
                         <span>↓ {downSpeedMbps.toFixed(1)} Mbps</span>
                         <span aria-hidden="true">·</span>
                         <span>↑ {upSpeedMbps.toFixed(1)} Mbps</span>
+                        {sessionAlert.enabled && (
+                          <>
+                            <span aria-hidden="true">·</span>
+                            <button
+                              type="button"
+                              onClick={() => setDrawerOpen(true)}
+                              className={`hover:underline cursor-pointer ${
+                                isSessionOverLimit
+                                  ? 'text-amber-600 dark:text-amber-400 font-semibold'
+                                  : ''
+                              }`}
+                            >
+                              Limit {Math.round(effectiveLimitSeconds / 60)}m
+                            </button>
+                          </>
+                        )}
                       </>
                     )
                   ) : status === ConnectionStatus.Reconnecting ? (
