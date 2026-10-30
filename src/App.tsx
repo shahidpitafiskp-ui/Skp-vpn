@@ -17,6 +17,7 @@ import {
   AlertCircle,
   RefreshCw,
   X,
+  Clock,
 } from 'lucide-react';
 import {
   ConnectionStatus,
@@ -24,6 +25,7 @@ import {
   NativeVpnEventPayload,
   ReconnectLogEntry,
   ServerLocation,
+  SessionAlertConfig,
   SpeedTestMetrics,
   SplitTunnelApp,
   VpnProtocol,
@@ -55,7 +57,9 @@ import { UpdatesModal } from './components/UpdatesModal';
 const LAST_SERVER_STORAGE_KEY = 'skp_vpn_last_server_id';
 const AUTO_RECONNECT_STORAGE_KEY = 'skp_vpn_auto_reconnect';
 const DARK_MODE_STORAGE_KEY = 'skp_vpn_dark_mode';
+const THEME_3D_STORAGE_KEY = 'skp_vpn_3d_theme';
 const BATTERY_BANNER_STORAGE_KEY = 'skp_vpn_show_battery_banner';
+const SESSION_ALERT_STORAGE_KEY = 'skp_vpn_session_alert';
 const MAX_RECONNECT_ATTEMPTS = 5;
 const BACKOFF_SECONDS = [2, 3, 5, 8, 12];
 
@@ -172,6 +176,18 @@ function loadInitialDarkMode(): boolean {
   return false;
 }
 
+function loadInitialTheme3d(): boolean {
+  try {
+    const saved = window.localStorage.getItem(THEME_3D_STORAGE_KEY);
+    if (saved !== null) {
+      return saved !== 'false';
+    }
+  } catch {
+    // Ignore storage errors
+  }
+  return true;
+}
+
 function loadInitialBatteryBanner(): boolean {
   try {
     const saved = window.localStorage.getItem(BATTERY_BANNER_STORAGE_KEY);
@@ -182,6 +198,41 @@ function loadInitialBatteryBanner(): boolean {
     // Ignore storage errors
   }
   return true;
+}
+
+function loadInitialSessionAlert(): SessionAlertConfig {
+  try {
+    const raw = window.localStorage.getItem(SESSION_ALERT_STORAGE_KEY);
+    if (raw) {
+      const parsed = JSON.parse(raw) as Partial<SessionAlertConfig>;
+      const mins =
+        typeof parsed.limitMinutes === 'number' &&
+        Number.isFinite(parsed.limitMinutes)
+          ? Math.max(1, Math.min(720, Math.round(parsed.limitMinutes)))
+          : 60;
+      return {
+        enabled: Boolean(parsed.enabled),
+        limitMinutes: mins,
+        systemNotification: parsed.systemNotification !== false,
+      };
+    }
+  } catch {
+    // Ignore storage errors
+  }
+  return {
+    enabled: false,
+    limitMinutes: 60,
+    systemNotification: true,
+  };
+}
+
+function detectNotificationPermission():
+  | NotificationPermission
+  | 'unsupported' {
+  if (typeof window === 'undefined' || !('Notification' in window)) {
+    return 'unsupported';
+  }
+  return Notification.permission;
 }
 
 function formatDuration(totalSeconds: number): string {
@@ -198,6 +249,7 @@ export default function App() {
   const nativeMode = isNativeAndroidVpn();
 
   const [darkMode, setDarkMode] = useState<boolean>(loadInitialDarkMode);
+  const [theme3d, setTheme3d] = useState<boolean>(loadInitialTheme3d);
 
   const [status, setStatus] = useState<ConnectionStatus>(
     ConnectionStatus.Disconnected
@@ -263,13 +315,25 @@ export default function App() {
   const [speedModalOpen, setSpeedModalOpen] = useState<boolean>(false);
   const [updatesModalOpen, setUpdatesModalOpen] = useState<boolean>(false);
 
-  // Live session timer & throughput telemetry
+  // Live session timer, session time-limit warning, & throughput telemetry
   const [sessionSeconds, setSessionSeconds] = useState<number>(0);
+  const [webSessionBytes, setWebSessionBytes] = useState<number>(0);
   const [downSpeedMbps, setDownSpeedMbps] = useState<number>(0);
   const [upSpeedMbps, setUpSpeedMbps] = useState<number>(0);
   const [lastSpeedTest, setLastSpeedTest] = useState<SpeedTestMetrics | null>(
     null
   );
+
+  const [sessionAlert, setSessionAlert] = useState<SessionAlertConfig>(
+    loadInitialSessionAlert
+  );
+  const [notificationPermission, setNotificationPermission] = useState<
+    NotificationPermission | 'unsupported'
+  >(detectNotificationPermission);
+  const [snoozedUntilSeconds, setSnoozedUntilSeconds] = useState<number>(0);
+  const [sessionWarningDismissed, setSessionWarningDismissed] =
+    useState<boolean>(false);
+  const lastNotifiedThresholdRef = useRef<number>(0);
 
   const transitionTimerRef = useRef<number | null>(null);
   const reconnectCountdownRef = useRef<number | null>(null);
@@ -296,6 +360,66 @@ export default function App() {
   const handleToggleDarkMode = useCallback(() => {
     setDarkMode((prev) => !prev);
   }, []);
+
+  // Sync 3D Theme & 3D Font class on <html> and persist in localStorage
+  useEffect(() => {
+    document.documentElement.classList.toggle('theme-3d', theme3d);
+    try {
+      window.localStorage.setItem(THEME_3D_STORAGE_KEY, String(theme3d));
+    } catch {
+      // Ignore storage errors
+    }
+  }, [theme3d]);
+
+  const handleToggleTheme3d = useCallback(() => {
+    setTheme3d((prev) => !prev);
+  }, []);
+
+  const handleUpdateSessionAlert = useCallback(
+    (patch: Partial<SessionAlertConfig>) => {
+      setSessionAlert((prev) => {
+        const next: SessionAlertConfig = {
+          ...prev,
+          ...patch,
+          limitMinutes:
+            patch.limitMinutes !== undefined
+              ? Math.max(1, Math.min(720, Math.round(patch.limitMinutes)))
+              : prev.limitMinutes,
+        };
+        try {
+          window.localStorage.setItem(
+            SESSION_ALERT_STORAGE_KEY,
+            JSON.stringify(next)
+          );
+        } catch {
+          // Ignore storage errors
+        }
+        return next;
+      });
+      if (patch.limitMinutes !== undefined || patch.enabled === true) {
+        setSnoozedUntilSeconds(0);
+        setSessionWarningDismissed(false);
+        lastNotifiedThresholdRef.current = 0;
+      }
+    },
+    []
+  );
+
+  const handleRequestNotificationPermission = useCallback(async () => {
+    if (typeof window === 'undefined' || !('Notification' in window)) {
+      setNotificationPermission('unsupported');
+      return;
+    }
+    try {
+      const result = await Notification.requestPermission();
+      setNotificationPermission(result);
+      if (result === 'granted') {
+        handleUpdateSessionAlert({ systemNotification: true });
+      }
+    } catch {
+      // Ignore permission prompt errors in embedded webviews
+    }
+  }, [handleUpdateSessionAlert]);
 
   const saveLastUsedServer = useCallback((srv: ServerLocation) => {
     setLastUsedServer(srv);
@@ -713,6 +837,9 @@ export default function App() {
     if (status !== ConnectionStatus.Connected) {
       setDownSpeedMbps(0);
       setUpSpeedMbps(0);
+      if (status === ConnectionStatus.Disconnected) {
+        setWebSessionBytes(0);
+      }
       return;
     }
 
@@ -723,17 +850,86 @@ export default function App() {
     setUpSpeedMbps(baseUp);
 
     const interval = window.setInterval(() => {
-      setSessionSeconds((prev) => prev + 1);
-      setDownSpeedMbps(
-        Number((baseDown + (Math.random() * 6.8 - 3.4)).toFixed(1))
+      const nextDown = Number(
+        (baseDown + (Math.random() * 6.8 - 3.4)).toFixed(1)
       );
-      setUpSpeedMbps(
-        Number((baseUp + (Math.random() * 2.8 - 1.4)).toFixed(1))
+      const nextUp = Number((baseUp + (Math.random() * 2.8 - 1.4)).toFixed(1));
+      setSessionSeconds((prev) => prev + 1);
+      setDownSpeedMbps(nextDown);
+      setUpSpeedMbps(nextUp);
+      setWebSessionBytes((prev) =>
+        Math.round(prev + (nextDown + nextUp) * 18500)
       );
     }, 1000);
 
     return () => window.clearInterval(interval);
   }, [nativeMode, status, displayedServer]);
+
+  const totalSessionBytes = nativeMode
+    ? nativeRxBytes + nativeTxBytes
+    : webSessionBytes;
+
+  const effectiveLimitSeconds =
+    snoozedUntilSeconds > 0
+      ? snoozedUntilSeconds
+      : sessionAlert.limitMinutes * 60;
+
+  const isSessionOverLimit =
+    sessionAlert.enabled &&
+    status === ConnectionStatus.Connected &&
+    sessionSeconds >= effectiveLimitSeconds;
+
+  // Reset session-limit warning latches when disconnected
+  useEffect(() => {
+    if (status === ConnectionStatus.Disconnected) {
+      setSnoozedUntilSeconds(0);
+      setSessionWarningDismissed(false);
+      lastNotifiedThresholdRef.current = 0;
+    }
+  }, [status]);
+
+  // Trigger visual warning & optional system notification when session exceeds limit
+  useEffect(() => {
+    if (!isSessionOverLimit) return;
+    if (lastNotifiedThresholdRef.current === effectiveLimitSeconds) return;
+
+    lastNotifiedThresholdRef.current = effectiveLimitSeconds;
+    setSessionWarningDismissed(false);
+
+    try {
+      navigator.vibrate?.(180);
+    } catch {
+      // Ignore vibration errors
+    }
+
+    if (
+      sessionAlert.systemNotification &&
+      typeof window !== 'undefined' &&
+      'Notification' in window &&
+      Notification.permission === 'granted'
+    ) {
+      try {
+        new Notification('SKP VPN · Session Time Limit Reached', {
+          body: `Active VPN session has exceeded ${Math.round(
+            effectiveLimitSeconds / 60
+          )} min (${formatBytesCompact(totalSessionBytes)} used).`,
+          icon: '/pwa-192x192.png',
+        });
+      } catch {
+        // Ignore Notification constructor restrictions in WebView contexts
+      }
+    }
+  }, [
+    effectiveLimitSeconds,
+    isSessionOverLimit,
+    sessionAlert.systemNotification,
+    totalSessionBytes,
+  ]);
+
+  const handleSnoozeSessionWarning = useCallback(() => {
+    setSnoozedUntilSeconds(sessionSeconds + 15 * 60);
+    setSessionWarningDismissed(false);
+  }, [sessionSeconds]);
 
   const handleToggleConnection = useCallback(() => {
     clearAllTimers();
@@ -876,11 +1072,11 @@ export default function App() {
   return (
     <div
       dir={language === 'ur' ? 'rtl' : 'ltr'}
-      className="min-h-screen bg-[#147A42] dark:bg-[#061A11] text-slate-900 dark:text-slate-100 flex flex-col transition-colors duration-200"
+      className="canvas-3d min-h-screen bg-[#147A42] dark:bg-[#061A11] text-slate-900 dark:text-slate-100 flex flex-col transition-colors duration-200"
     >
       {/* Desktop Top Bar (3-zone contract) */}
-      <header className="hidden lg:flex items-center justify-between gap-8 px-8 py-3.5 bg-[#0B5D32] dark:bg-[#051B11] text-white border-b border-white/15 dark:border-emerald-900/50">
-        <div className="text-lg font-bold tracking-tight text-white whitespace-nowrap shrink-0">
+      <header className="header-3d hidden lg:flex items-center justify-between gap-8 px-8 py-3.5 bg-[#0B5D32] dark:bg-[#051B11] text-white border-b border-white/15 dark:border-emerald-900/50">
+        <div className="font-display-3d text-lg font-bold tracking-tight text-white whitespace-nowrap shrink-0">
           SKP VPN
         </div>
 
@@ -941,7 +1137,7 @@ export default function App() {
             {/* SKP VPN Deep Emerald Top Bar */}
             <div
               dir="ltr"
-              className="bg-[#0B5D32] dark:bg-[#051B11] text-white h-[58px] px-3 flex items-center justify-between select-none border-b border-transparent dark:border-emerald-900/40"
+              className="header-3d bg-[#0B5D32] dark:bg-[#051B11] text-white h-[58px] px-3 flex items-center justify-between select-none border-b border-transparent dark:border-emerald-900/40"
             >
               <div className="flex items-center gap-3">
                 <button
@@ -952,7 +1148,7 @@ export default function App() {
                 >
                   <Menu className="w-6 h-6" strokeWidth={2.2} />
                 </button>
-                <span className="text-[21px] font-semibold tracking-tight whitespace-nowrap">
+                <span className="font-display-3d text-[21px] font-semibold tracking-tight whitespace-nowrap">
                   SKP VPN
                 </span>
               </div>
@@ -1042,13 +1238,81 @@ export default function App() {
 
             {/* Main Card Container */}
             <div className="p-3.5 sm:p-4 space-y-3.5">
+              {/* Session Time Limit Exceeded Visual Warning Card */}
+              {isSessionOverLimit && !sessionWarningDismissed && (
+                <div
+                  role="alert"
+                  className="bg-amber-50 dark:bg-[#241A0B] border border-amber-300 dark:border-amber-700/70 text-amber-950 dark:text-amber-100 rounded-xl p-3.5 shadow-xs space-y-2.5 transition-colors"
+                >
+                  <div className="flex items-start justify-between gap-2">
+                    <div className="flex items-start gap-2.5 min-w-0">
+                      <Clock className="w-4 h-4 text-amber-600 dark:text-amber-400 shrink-0 mt-0.5" />
+                      <div className="min-w-0">
+                        <div
+                          className={`text-xs font-bold text-amber-950 dark:text-amber-100 ${
+                            language === 'ur' ? 'font-urdu' : ''
+                          }`}
+                        >
+                          {language === 'ur'
+                            ? 'سیشن کا مقررہ وقت مکمل ہو گیا'
+                            : 'Session Time Limit Exceeded'}
+                        </div>
+                        <p className="text-[11.5px] text-amber-800 dark:text-amber-200/90 mt-0.5 font-mono-tabular">
+                          {language === 'ur'
+                            ? `دورانیہ ${formatDuration(
+                                sessionSeconds
+                              )} · لمٹ ${Math.round(
+                                effectiveLimitSeconds / 60
+                              )}m · ڈیٹا ${formatBytesCompact(
+                                totalSessionBytes
+                              )}`
+                            : `Active ${formatDuration(
+                                sessionSeconds
+                              )} (Limit ${Math.round(
+                                effectiveLimitSeconds / 60
+                              )}m) · Data ${formatBytesCompact(
+                                totalSessionBytes
+                              )}`}
+                        </p>
+                      </div>
+                    </div>
+
+                    <button
+                      type="button"
+                      onClick={() => setSessionWarningDismissed(true)}
+                      aria-label="Dismiss session limit warning"
+                      className="min-w-[36px] min-h-[36px] -mt-1 -me-1 rounded-lg flex items-center justify-center text-amber-700 dark:text-amber-300 hover:bg-amber-200/60 dark:hover:bg-amber-800/40 transition-colors cursor-pointer shrink-0"
+                    >
+                      <X className="w-4 h-4" />
+                    </button>
+                  </div>
+
+                  <div className="flex items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={handleToggleConnection}
+                      className="flex-1 min-h-[40px] px-3 py-1.5 rounded-lg bg-amber-600 hover:bg-amber-700 text-white text-xs font-semibold transition-colors cursor-pointer whitespace-nowrap"
+                    >
+                      {language === 'ur' ? 'فوری ڈس کنیکٹ کریں' : 'Disconnect Now'}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={handleSnoozeSessionWarning}
+                      className="min-h-[40px] px-3 py-1.5 rounded-lg bg-white dark:bg-[#161108] border border-amber-300 dark:border-amber-700/70 hover:bg-amber-100/60 dark:hover:bg-amber-900/40 text-amber-900 dark:text-amber-200 text-xs font-semibold font-mono-tabular transition-colors cursor-pointer whitespace-nowrap shrink-0"
+                    >
+                      +15m
+                    </button>
+                  </div>
+                </div>
+              )}
+
               {/* Primary Connection Card */}
-              <div className="bg-white dark:bg-[#0F2018] rounded-xl shadow-sm border border-transparent dark:border-emerald-900/40 px-5 pt-6 pb-5 flex flex-col items-center transition-colors duration-200">
+              <div className="card-3d bg-white dark:bg-[#0F2018] rounded-xl shadow-sm border border-transparent dark:border-emerald-900/40 px-5 pt-6 pb-5 flex flex-col items-center transition-colors duration-200">
                 {/* Emerald Rounded Server Selector Button (shows actual connected server + flag when Auto-Select connects!) */}
                 <button
                   type="button"
                   onClick={() => setServerModalOpen(true)}
-                  className="w-full max-w-[292px] h-[54px] bg-[#15803D] dark:bg-[#126B34] hover:bg-[#116932] dark:hover:bg-[#15803D] active:scale-[0.99] text-white rounded-full px-3.5 flex items-center justify-between shadow-xs transition-all cursor-pointer"
+                  className="btn-3d-emerald w-full max-w-[292px] h-[54px] bg-[#15803D] dark:bg-[#126B34] hover:bg-[#116932] dark:hover:bg-[#15803D] text-white rounded-full px-3.5 flex items-center justify-between shadow-xs transition-all cursor-pointer"
                 >
                   <FlagIcon
                     countryCode={displayedServer.countryCode}
@@ -1106,7 +1370,31 @@ export default function App() {
                   {status === ConnectionStatus.Connected ? (
                     nativeMode ? (
                       <>
-                        <span>{formatDuration(sessionSeconds)}</span>
+                        <span
+                          className={
+                            isSessionOverLimit
+                              ? 'text-amber-600 dark:text-amber-400 font-semibold'
+                              : ''
+                          }
+                        >
+                          {formatDuration(sessionSeconds)}
+                        </span>
+                        {sessionAlert.enabled && (
+                          <>
+                            <span aria-hidden="true">·</span>
+                            <button
+                              type="button"
+                              onClick={() => setDrawerOpen(true)}
+                              className={`hover:underline cursor-pointer ${
+                                isSessionOverLimit
+                                  ? 'text-amber-600 dark:text-amber-400 font-semibold'
+                                  : ''
+                              }`}
+                            >
+                              Limit {Math.round(effectiveLimitSeconds / 60)}m
+                            </button>
+                          </>
+                        )}
                         <span aria-hidden="true">·</span>
                         <span>↓ {formatBytesCompact(nativeRxBytes)}</span>
                         <span aria-hidden="true">·</span>
@@ -1114,7 +1402,31 @@ export default function App() {
                       </>
                     ) : (
                       <>
-                        <span>{formatDuration(sessionSeconds)}</span>
+                        <span
+                          className={
+                            isSessionOverLimit
+                              ? 'text-amber-600 dark:text-amber-400 font-semibold'
+                              : ''
+                          }
+                        >
+                          {formatDuration(sessionSeconds)}
+                        </span>
+                        {sessionAlert.enabled && (
+                          <>
+                            <span aria-hidden="true">·</span>
+                            <button
+                              type="button"
+                              onClick={() => setDrawerOpen(true)}
+                              className={`hover:underline cursor-pointer ${
+                                isSessionOverLimit
+                                  ? 'text-amber-600 dark:text-amber-400 font-semibold'
+                                  : ''
+                              }`}
+                            >
+                              Limit {Math.round(effectiveLimitSeconds / 60)}m
+                            </button>
+                          </>
+                        )}
                         <span aria-hidden="true">·</span>
                         <span>↓ {downSpeedMbps.toFixed(1)} Mbps</span>
                         <span aria-hidden="true">·</span>
@@ -1190,7 +1502,7 @@ export default function App() {
                 {/* Static "Free Unlimited" Label */}
                 <div
                   className={`mt-2.5 text-[16px] font-medium text-[#15803D] dark:text-emerald-400 ${
-                    language === 'ur' ? 'font-urdu' : ''
+                    language === 'ur' ? 'font-urdu' : 'font-display-3d-emerald'
                   }`}
                 >
                   {t.freeLabel}
@@ -1207,7 +1519,7 @@ export default function App() {
               />
 
               {/* Auto-Reconnect Guard Bar */}
-              <div className="bg-white dark:bg-[#0F2018] rounded-xl shadow-sm border border-transparent dark:border-emerald-900/40 px-4 py-3 flex items-center justify-between gap-3 transition-colors duration-200">
+              <div className="card-3d bg-white dark:bg-[#0F2018] rounded-xl shadow-sm border border-transparent dark:border-emerald-900/40 px-4 py-3 flex items-center justify-between gap-3 transition-colors duration-200">
                 <div className="min-w-0">
                   <div className="flex items-center gap-1.5 text-xs font-semibold text-slate-800 dark:text-slate-100">
                     <RotateCw
@@ -1287,10 +1599,10 @@ export default function App() {
           {/* RIGHT COMPANION WORKSPACE (Visible on Desktop lg:) */}
           <section className="hidden lg:flex lg:col-span-7 flex-col gap-6">
             {/* Live Connection Diagnostics & Fast Speed Summary */}
-            <div className="bg-white dark:bg-[#0F2018] rounded-2xl shadow-sm border border-transparent dark:border-emerald-900/40 p-6 space-y-5 transition-colors duration-200">
+            <div className="card-3d bg-white dark:bg-[#0F2018] rounded-2xl shadow-sm border border-transparent dark:border-emerald-900/40 p-6 space-y-5 transition-colors duration-200">
               <div className="flex items-center justify-between gap-4">
                 <div>
-                  <h1 className="text-xl font-bold text-slate-900 dark:text-slate-100">
+                  <h1 className="font-display-3d-surface text-xl font-bold text-slate-900 dark:text-slate-100">
                     Tunnel Diagnostics &amp; Speed Monitor
                   </h1>
                   <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">
@@ -1320,7 +1632,7 @@ export default function App() {
                   <button
                     type="button"
                     onClick={() => setSpeedModalOpen(true)}
-                    className="min-h-[40px] px-4 py-2 rounded-xl bg-[#15803D] hover:bg-[#116932] text-white text-xs font-semibold flex items-center gap-1.5 transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+                    className="btn-3d-emerald min-h-[40px] px-4 py-2 rounded-xl bg-[#15803D] hover:bg-[#116932] text-white text-xs font-semibold flex items-center gap-1.5 transition-colors whitespace-nowrap shrink-0 cursor-pointer"
                   >
                     <Gauge className="w-4 h-4" />
                     <span>Fast Speed Check</span>
@@ -1330,10 +1642,30 @@ export default function App() {
 
               <div className="grid grid-cols-3 gap-4 pt-1 border-t border-slate-100 dark:border-emerald-900/40">
                 <div className="pt-3">
-                  <div className="text-xs text-slate-500 dark:text-slate-400">
-                    {t.duration}
+                  <div className="text-xs text-slate-500 dark:text-slate-400 flex items-center gap-1.5">
+                    <span>{t.duration}</span>
+                    {sessionAlert.enabled && (
+                      <>
+                        <span aria-hidden="true">·</span>
+                        <span
+                          className={`font-mono-tabular ${
+                            isSessionOverLimit
+                              ? 'text-amber-600 dark:text-amber-400 font-semibold'
+                              : ''
+                          }`}
+                        >
+                          Limit {Math.round(effectiveLimitSeconds / 60)}m
+                        </span>
+                      </>
+                    )}
                   </div>
-                  <div className="text-2xl font-bold font-mono-tabular text-slate-900 dark:text-white mt-1">
+                  <div
+                    className={`text-2xl font-bold font-mono-tabular font-mono-3d mt-1 ${
+                      isSessionOverLimit
+                        ? 'text-amber-600 dark:text-amber-400'
+                        : 'text-slate-900 dark:text-white'
+                    }`}
+                  >
                     {formatDuration(sessionSeconds)}
                   </div>
                 </div>
@@ -1341,7 +1673,7 @@ export default function App() {
                   <div className="text-xs text-slate-500 dark:text-slate-400">
                     {t.download}
                   </div>
-                  <div className="text-2xl font-bold font-mono-tabular text-slate-900 dark:text-white mt-1">
+                  <div className="text-2xl font-bold font-mono-tabular font-mono-3d text-slate-900 dark:text-white mt-1">
                     {downSpeedMbps.toFixed(1)}{' '}
                     <span className="text-xs font-normal text-slate-500 dark:text-slate-400">
                       Mbps
@@ -1352,7 +1684,7 @@ export default function App() {
                   <div className="text-xs text-slate-500 dark:text-slate-400">
                     {t.upload}
                   </div>
-                  <div className="text-2xl font-bold font-mono-tabular text-slate-900 dark:text-white mt-1">
+                  <div className="text-2xl font-bold font-mono-tabular font-mono-3d text-slate-900 dark:text-white mt-1">
                     {upSpeedMbps.toFixed(1)}{' '}
                     <span className="text-xs font-normal text-slate-500 dark:text-slate-400">
                       Mbps
@@ -1424,10 +1756,10 @@ export default function App() {
             </div>
 
             {/* All Free Unlocked Global Proxy Nodes */}
-            <div className="bg-white dark:bg-[#0F2018] rounded-2xl shadow-sm border border-transparent dark:border-emerald-900/40 p-6 transition-colors duration-200">
+            <div className="card-3d bg-white dark:bg-[#0F2018] rounded-2xl shadow-sm border border-transparent dark:border-emerald-900/40 p-6 transition-colors duration-200">
               <div className="flex items-center justify-between mb-4">
                 <div>
-                  <h2 className="text-base font-bold text-slate-900 dark:text-slate-100">
+                  <h2 className="font-display-3d-surface text-base font-bold text-slate-900 dark:text-slate-100">
                     Free Global Proxy Nodes
                   </h2>
                   <p className="text-xs text-slate-500 dark:text-slate-400">
@@ -1463,13 +1795,19 @@ export default function App() {
         isOpen={drawerOpen}
         language={language}
         darkMode={darkMode}
+        theme3d={theme3d}
         protocol={protocol}
         splitApps={splitApps}
         killSwitch={killSwitch}
         autoReconnect={autoReconnect}
         lastUsedServer={lastUsedServer}
         status={status}
+        sessionAlert={sessionAlert}
+        notificationPermission={notificationPermission}
+        onUpdateSessionAlert={handleUpdateSessionAlert}
+        onRequestNotificationPermission={handleRequestNotificationPermission}
         onToggleDarkMode={handleToggleDarkMode}
+        onToggleTheme3d={handleToggleTheme3d}
         onSelectProtocol={setProtocol}
         onToggleSplitApp={handleToggleSplitApp}
         onToggleKillSwitch={() => setKillSwitch((prev) => !prev)}

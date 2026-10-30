@@ -75,3 +75,10 @@ export interface NativeVpnEventPayload {
   otaVersion?: string;
   installedBuild?: number;
 }
+
+export interface SessionAlertConfig {
+  enabled: boolean;
+  limitMinutes: number;
+  systemNotification: boolean;
+}
+

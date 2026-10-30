@@ -19,11 +19,14 @@
     <meta name="twitter:card" content="summary_large_image" />
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-    <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600&family=Noto+Nastaliq+Urdu:wght@400;600&family=Plus+Jakarta+Sans:wght@400;500;600;700&display=swap" rel="stylesheet" />
+    <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600;700&family=Noto+Nastaliq+Urdu:wght@400;600&family=Outfit:wght@700;800&family=Plus+Jakarta+Sans:wght@400;500;600;700&display=swap" rel="stylesheet" />
     <script>
       try {
         if (localStorage.getItem('skp_vpn_dark_mode') === 'true') {
           document.documentElement.classList.add('dark');
+        }
+        if (localStorage.getItem('skp_vpn_3d_theme') !== 'false') {
+          document.documentElement.classList.add('theme-3d');
         }
       } catch (e) {}
     </script>

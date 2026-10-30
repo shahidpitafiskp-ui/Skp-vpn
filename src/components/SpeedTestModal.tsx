@@ -195,13 +195,13 @@ export const FastSpeedCheckCard: React.FC<FastSpeedCheckCardProps> = ({
     phase === 'idle' && lastMetrics ? lastMetrics.pingMs : unloadedPing;
 
   return (
-    <div className="bg-white dark:bg-[#0F2018] rounded-xl shadow-xs border border-slate-200/70 dark:border-emerald-900/40 p-4 space-y-3.5 transition-colors duration-200">
+    <div className="card-3d bg-white dark:bg-[#0F2018] rounded-xl shadow-xs border border-slate-200/70 dark:border-emerald-900/40 p-4 space-y-3.5 transition-colors duration-200">
       <div className="flex items-center justify-between gap-2">
         <div className="flex items-center gap-2 min-w-0">
           <Gauge className="w-4 h-4 text-[#15803D] dark:text-emerald-400 shrink-0" />
           <span
             className={`text-sm font-bold text-slate-900 dark:text-slate-100 truncate ${
-              language === 'ur' ? 'font-urdu' : ''
+              language === 'ur' ? 'font-urdu' : 'font-display-3d-surface'
             }`}
           >
             {language === 'ur'
@@ -225,7 +225,7 @@ export const FastSpeedCheckCard: React.FC<FastSpeedCheckCardProps> = ({
       <div className="flex items-center justify-between gap-4 py-1">
         <div>
           <div className="flex items-baseline gap-1.5">
-            <span className="text-4xl font-bold font-mono-tabular tracking-tight text-slate-900 dark:text-white">
+            <span className="text-4xl font-bold font-mono-tabular font-mono-3d tracking-tight text-slate-900 dark:text-white">
               {displayedDown > 0 ? displayedDown.toFixed(1) : '0.0'}
             </span>
             <span className="text-sm font-semibold text-slate-500 dark:text-slate-400">
@@ -245,7 +245,7 @@ export const FastSpeedCheckCard: React.FC<FastSpeedCheckCardProps> = ({
           type="button"
           disabled={running}
           onClick={startCheck}
-          className="min-h-[44px] px-4 py-2.5 rounded-xl bg-[#15803D] disabled:opacity-60 hover:bg-[#116932] active:scale-[0.98] text-white text-xs font-semibold flex items-center gap-1.5 transition-all whitespace-nowrap shrink-0 cursor-pointer"
+          className="btn-3d-emerald min-h-[44px] px-4 py-2.5 rounded-xl bg-[#15803D] disabled:opacity-60 hover:bg-[#116932] text-white text-xs font-semibold flex items-center gap-1.5 transition-all whitespace-nowrap shrink-0 cursor-pointer"
         >
           <RotateCw
             className={`w-3.5 h-3.5 ${running ? 'animate-spin' : ''}`}
