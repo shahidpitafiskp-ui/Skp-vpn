@@ -38,10 +38,13 @@ import {
 import {
   formatBytesCompact,
   getNativeVpnStatus,
+  hasNativeInAppApkInstaller,
   isNativeAndroidVpn,
   nativeConnectVpn,
   nativeDisconnectVpn,
+  nativeDownloadAndInstallApk,
   subscribeNativeVpnEvents,
+  triggerNativeOtaUpdateCheck,
 } from './utils/nativeVpn';
 import { FlagIcon } from './components/FlagIcon';
 import { ConnectRingButton } from './components/ConnectRingButton';
@@ -274,6 +277,8 @@ export default function App() {
   const [nativeTxBytes, setNativeTxBytes] = useState<number>(0);
   const [otaStatus, setOtaStatus] = useState<string>('idle');
   const [otaVersion, setOtaVersion] = useState<string>('');
+  const [otaProgress, setOtaProgress] = useState<number>(0);
+  const [otaError, setOtaError] = useState<string>('');
 
   // Auto-reconnect runtime state
   const [reconnectAttempt, setReconnectAttempt] = useState<number>(0);
@@ -477,6 +482,9 @@ export default function App() {
         setNativeTxBytes(payload.txBytes);
       if (payload.otaStatus) setOtaStatus(payload.otaStatus);
       if (payload.otaVersion !== undefined) setOtaVersion(payload.otaVersion);
+      if (typeof payload.otaProgress === 'number')
+        setOtaProgress(payload.otaProgress);
+      if (payload.otaError !== undefined) setOtaError(payload.otaError);
 
       if (payload.serverId) {
         const matched = SERVER_LOCATIONS.find((s) => s.id === payload.serverId);
@@ -1043,6 +1051,18 @@ export default function App() {
     );
   }, []);
 
+  const handleMenuQuickUpdate = useCallback(() => {
+    setUpdatesModalOpen(true);
+    if (nativeMode) {
+      const triggered = triggerNativeOtaUpdateCheck();
+      if (!triggered && hasNativeInAppApkInstaller()) {
+        nativeDownloadAndInstallApk(
+          'https://github.com/shahidpitafiskp-ui/Skp-vpn/releases/latest/download/app-debug.apk'
+        );
+      }
+    }
+  }, [nativeMode]);
+
   const t = UI_STRINGS[language];
 
   const statusText =
@@ -1189,16 +1209,26 @@ export default function App() {
               </div>
             </div>
 
-            {/* Instant Auto-Update Banner (visible automatically when an OTA update downloads on app open) */}
-            {otaStatus === 'downloading' && (
-              <div className="w-full bg-emerald-950 text-emerald-200 px-4 py-2 text-xs font-medium flex items-center justify-center gap-2 border-b border-emerald-800/60">
+            {/* Instant Auto-Update Banner (visible automatically when an OTA or in-app APK update downloads) */}
+            {(otaStatus === 'downloading' ||
+              otaStatus === 'downloading_apk' ||
+              otaStatus === 'installing_apk') && (
+              <button
+                type="button"
+                onClick={() => setUpdatesModalOpen(true)}
+                className="w-full bg-emerald-950 hover:bg-emerald-900 text-emerald-200 px-4 py-2 text-xs font-medium flex items-center justify-center gap-2 border-b border-emerald-800/60 transition-colors cursor-pointer"
+              >
                 <RefreshCw className="w-3.5 h-3.5 animate-spin text-emerald-400 shrink-0" />
                 <span className={language === 'ur' ? 'font-urdu' : ''}>
-                  {language === 'ur'
-                    ? `نئی اپڈیٹ (${otaVersion || 'Latest'}) خودکار انسٹال ہو رہی ہے...`
-                    : `Auto-updating SKP VPN ${otaVersion ? `to ${otaVersion}` : ''}...`}
+                  {otaStatus === 'downloading_apk'
+                    ? language === 'ur'
+                      ? `ایپ اپڈیٹ ڈاؤنلوڈ ہو رہی ہے (${Math.max(1, Math.round(otaProgress))}%)...`
+                      : `Downloading in-app update (${Math.max(1, Math.round(otaProgress))}%)...`
+                    : language === 'ur'
+                    ? `نئی اپڈیٹ (${otaVersion || 'Latest'}) خودکار انسٹال ہو رہی ہے (${Math.max(5, Math.round(otaProgress))}%)...`
+                    : `Auto-updating SKP VPN ${otaVersion ? `to ${otaVersion}` : ''} (${Math.max(5, Math.round(otaProgress))}%)...`}
                 </span>
-              </div>
+              </button>
             )}
 
             {/* Orange Battery Optimization & 5-Star Support Banner with Close Icon */}
@@ -1814,9 +1844,12 @@ export default function App() {
         onToggleAutoReconnect={handleToggleAutoReconnect}
         onSimulateDrop={() => handleConnectionDropDetected('tunnel_drop')}
         onChangeLanguage={setLanguage}
+        otaStatus={otaStatus}
+        otaProgress={otaProgress}
         onOpenSpeedTest={() => setSpeedModalOpen(true)}
         onOpenBattery={() => setSupportModalOpen(true)}
         onOpenUpdates={() => setUpdatesModalOpen(true)}
+        onUpdateAppNow={handleMenuQuickUpdate}
         onClose={() => setDrawerOpen(false)}
       />
 
@@ -1852,6 +1885,9 @@ export default function App() {
         isOpen={updatesModalOpen}
         language={language}
         otaStatus={otaStatus}
+        otaProgress={otaProgress}
+        otaError={otaError}
+        otaVersion={otaVersion}
         onClose={() => setUpdatesModalOpen(false)}
       />
     </div>

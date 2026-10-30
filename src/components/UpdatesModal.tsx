@@ -4,26 +4,34 @@ import {
   RefreshCw,
   CheckCircle2,
   ArrowUpCircle,
-  ExternalLink,
+  Download,
   AlertCircle,
   Zap,
+  ShieldCheck,
 } from 'lucide-react';
 import { Language } from '../types/vpn';
 import {
+  applyWebInstantUpdate,
   formatBytesCompact,
   getNativeInstalledBuildNumber,
+  hasNativeInAppApkInstaller,
   isNativeAndroidVpn,
+  nativeDownloadAndInstallApk,
+  nativeInstallDownloadedApkIfReady,
   openNativeExternalUrl,
   triggerNativeOtaUpdateCheck,
 } from '../utils/nativeVpn';
 
 const GITHUB_REPO = 'shahidpitafiskp-ui/Skp-vpn';
+const GITHUB_OTA_COMMIT_API = `https://api.github.com/repos/${GITHUB_REPO}/commits/ota-live`;
 const OTA_MANIFEST_URL = `https://raw.githubusercontent.com/${GITHUB_REPO}/ota-live/ota-manifest.json`;
 const LATEST_RELEASE_API = `https://api.github.com/repos/${GITHUB_REPO}/releases/latest`;
 const DIRECT_APK_URL = `https://github.com/${GITHUB_REPO}/releases/latest/download/app-debug.apk`;
 
 interface GitHubReleaseInfo {
   buildNumber: number | null;
+  otaBuildNumber: number | null;
+  releaseApkBuildNumber: number | null;
   publishedAt: string;
   apkSizeBytes: number | null;
   downloadUrl: string;
@@ -33,6 +41,9 @@ interface UpdatesModalProps {
   isOpen: boolean;
   language: Language;
   otaStatus?: string;
+  otaProgress?: number;
+  otaError?: string;
+  otaVersion?: string;
   onClose: () => void;
 }
 
@@ -47,6 +58,9 @@ export const UpdatesModal: React.FC<UpdatesModalProps> = ({
   isOpen,
   language,
   otaStatus = 'idle',
+  otaProgress = 0,
+  otaError = '',
+  otaVersion = '',
   onClose,
 }) => {
   const rawEnvBuild = import.meta.env.VITE_APP_BUILD_NUMBER as
@@ -61,6 +75,7 @@ export const UpdatesModal: React.FC<UpdatesModalProps> = ({
     (import.meta.env.VITE_APP_COMMIT_SHA as string | undefined) || '';
 
   const [checking, setChecking] = useState<boolean>(false);
+  const [webUpdating, setWebUpdating] = useState<boolean>(false);
   const [releaseInfo, setReleaseInfo] = useState<GitHubReleaseInfo | null>(
     null
   );
@@ -71,11 +86,28 @@ export const UpdatesModal: React.FC<UpdatesModalProps> = ({
     setCheckError(null);
 
     try {
-      // Check fast OTA manifest first (updates in ~25s on push), then GitHub Release
       let otaRunNum: number | null = null;
       let otaDate = '';
+
+      // 1. Resolve exact uncached commit SHA of ota-live via GitHub API to bypass 5-min CDN cache
+      let manifestUrlToFetch = `${OTA_MANIFEST_URL}?t=${Date.now()}`;
       try {
-        const otaRes = await fetch(`${OTA_MANIFEST_URL}?t=${Date.now()}`, {
+        const shaRes = await fetch(`${GITHUB_OTA_COMMIT_API}?t=${Date.now()}`, {
+          headers: { Accept: 'application/vnd.github+json' },
+          cache: 'no-store',
+        });
+        if (shaRes.ok) {
+          const shaData = await shaRes.json();
+          if (typeof shaData.sha === 'string' && shaData.sha.length >= 7) {
+            manifestUrlToFetch = `https://raw.githubusercontent.com/${GITHUB_REPO}/${shaData.sha}/ota-manifest.json`;
+          }
+        }
+      } catch {
+        // Fallback to branch raw URL
+      }
+
+      try {
+        const otaRes = await fetch(manifestUrlToFetch, {
           cache: 'no-store',
         });
         if (otaRes.ok) {
@@ -96,7 +128,7 @@ export const UpdatesModal: React.FC<UpdatesModalProps> = ({
         // Fallback to GitHub Releases API
       }
 
-      const res = await fetch(LATEST_RELEASE_API, {
+      const res = await fetch(`${LATEST_RELEASE_API}?t=${Date.now()}`, {
         headers: {
           Accept: 'application/vnd.github+json',
         },
@@ -107,6 +139,8 @@ export const UpdatesModal: React.FC<UpdatesModalProps> = ({
         if (otaRunNum !== null) {
           setReleaseInfo({
             buildNumber: otaRunNum,
+            otaBuildNumber: otaRunNum,
+            releaseApkBuildNumber: null,
             publishedAt: otaDate,
             apkSizeBytes: null,
             downloadUrl: DIRECT_APK_URL,
@@ -117,7 +151,7 @@ export const UpdatesModal: React.FC<UpdatesModalProps> = ({
           setReleaseInfo(null);
           setCheckError(
             language === 'ur'
-              ? 'ابھی پہلا ریلیز بلڈ تیار ہو رہا ہے۔ چند لمحوں بعد دوبارہ چیک کریں۔'
+              ? 'ابھی نئی اپڈیٹ تیار ہو رہی ہے۔ چند لمحوں بعد دوبارہ چیک کریں۔'
               : 'Latest build is being prepared on GitHub Actions. Check again shortly.'
           );
           return;
@@ -153,6 +187,8 @@ export const UpdatesModal: React.FC<UpdatesModalProps> = ({
 
       setReleaseInfo({
         buildNumber: bestBuildNum,
+        otaBuildNumber: otaRunNum,
+        releaseApkBuildNumber: releaseBuildNum,
         publishedAt: publishedDate,
         apkSizeBytes:
           apkAsset && typeof apkAsset.size === 'number' ? apkAsset.size : null,
@@ -180,6 +216,9 @@ export const UpdatesModal: React.FC<UpdatesModalProps> = ({
 
   if (!isOpen) return null;
 
+  const nativeAndroid = isNativeAndroidVpn();
+  const supportsDirectApkInstall = hasNativeInAppApkInstaller();
+
   const isNewerAvailable =
     releaseInfo?.buildNumber !== null &&
     releaseInfo?.buildNumber !== undefined &&
@@ -193,7 +232,46 @@ export const UpdatesModal: React.FC<UpdatesModalProps> = ({
     releaseInfo.buildNumber <= currentBuildNumber;
 
   const targetUpdateUrl = releaseInfo?.downloadUrl || DIRECT_APK_URL;
-  const isDownloadingOta = otaStatus === 'downloading';
+
+  const isBusyUpdating =
+    otaStatus === 'checking' ||
+    otaStatus === 'downloading' ||
+    otaStatus === 'downloading_apk' ||
+    otaStatus === 'installing_apk' ||
+    webUpdating;
+
+  const displayProgress = Math.max(
+    4,
+    Math.min(100, Math.round(otaProgress || (webUpdating ? 75 : 15)))
+  );
+
+  const handleSmartInAppUpdate = () => {
+    if (nativeAndroid) {
+      // Trigger fast in-app OTA update first; if user has an older APK or wants full native package update,
+      // they can also tap Direct Full App Update below without ever opening an external browser!
+      const startedOta = triggerNativeOtaUpdateCheck();
+      if (!startedOta && supportsDirectApkInstall) {
+        nativeDownloadAndInstallApk(targetUpdateUrl);
+      } else if (!startedOta) {
+        openNativeExternalUrl(targetUpdateUrl);
+      }
+      checkLatestUpdate();
+      return;
+    }
+
+    setWebUpdating(true);
+    applyWebInstantUpdate().catch(() => {
+      setWebUpdating(false);
+    });
+  };
+
+  const handleDirectInAppApkInstall = () => {
+    if (supportsDirectApkInstall) {
+      nativeDownloadAndInstallApk(targetUpdateUrl);
+      return;
+    }
+    openNativeExternalUrl(targetUpdateUrl);
+  };
 
   return (
     <div
@@ -201,48 +279,48 @@ export const UpdatesModal: React.FC<UpdatesModalProps> = ({
       onClick={onClose}
     >
       <div
-        className="w-full sm:max-w-md bg-white dark:bg-[#0D1E16] text-slate-900 dark:text-slate-100 rounded-t-3xl sm:rounded-2xl shadow-xl border border-transparent dark:border-emerald-900/40 overflow-hidden max-h-[88vh] flex flex-col transition-colors duration-200"
+        className="card-3d w-full sm:max-w-md bg-white dark:bg-[#0D1E16] text-slate-900 dark:text-slate-100 rounded-t-3xl sm:rounded-2xl shadow-xl border border-transparent dark:border-emerald-900/40 overflow-hidden max-h-[90vh] flex flex-col transition-colors duration-200"
         onClick={(e) => e.stopPropagation()}
       >
         {/* Top Emerald Header */}
-        <div className="bg-[#0B5D32] dark:bg-[#062816] px-6 py-4 text-white flex items-center justify-between border-b border-transparent dark:border-emerald-900/50">
+        <div className="header-3d bg-[#0B5D32] dark:bg-[#062816] px-6 py-4 text-white flex items-center justify-between border-b border-transparent dark:border-emerald-900/50">
           <div className="flex items-center gap-2.5">
             <RefreshCw
               className={`w-5 h-5 shrink-0 ${
-                checking || isDownloadingOta ? 'animate-spin' : ''
+                checking || isBusyUpdating ? 'animate-spin' : ''
               }`}
             />
             <h2
-              className={`text-base font-bold ${
+              className={`font-display-3d text-base font-bold ${
                 language === 'ur' ? 'font-urdu' : ''
               }`}
             >
-              {language === 'ur' ? 'ایپ اپڈیٹس (Auto-Update)' : 'App Updates'}
+              {language === 'ur' ? 'ایپ اپڈیٹر (In-App Update)' : 'In-App Updater'}
             </h2>
           </div>
           <button
             type="button"
             onClick={onClose}
             aria-label="Close updates modal"
-            className="min-w-[40px] min-h-[40px] -mr-2 rounded-full flex items-center justify-center text-white/90 hover:bg-white/15 transition-colors cursor-pointer"
+            className="min-w-[44px] min-h-[44px] -mr-2 rounded-full flex items-center justify-center text-white/90 hover:bg-white/15 transition-colors cursor-pointer"
           >
             <X className="w-5 h-5" />
           </button>
         </div>
 
-        <div className="p-6 space-y-5 overflow-y-auto">
-          {/* Auto-Update Enabled Info */}
-          <div className="flex items-center gap-2.5 text-xs text-slate-600 dark:text-slate-300">
-            <Zap className="w-4 h-4 text-[#15803D] dark:text-emerald-400 shrink-0" />
+        <div className="p-6 space-y-4 overflow-y-auto">
+          {/* Direct In-App Update Assurance */}
+          <div className="flex items-start gap-2.5 text-xs text-slate-600 dark:text-slate-300">
+            <Zap className="w-4 h-4 text-[#15803D] dark:text-emerald-400 shrink-0 mt-0.5" />
             <span className={language === 'ur' ? 'font-urdu' : ''}>
               {language === 'ur'
-                ? 'آٹو اپڈیٹ فعال ہے: جب بھی نئی تبدیلی آئے گی، ایپ کھولتے ہی خودکار اپڈیٹ ہو جائے گی۔'
-                : 'Auto-Update Active: New changes apply automatically whenever you open SKP VPN.'}
+                ? 'اب مینوئل براؤزر سے ایپ ڈاؤنلوڈ کرنے کی ضرورت نہیں۔ نیچے بٹن دبانے سے ایپ اسی سکرین کے اندر براہِ راست اپڈیٹ ہو جائے گی۔'
+                : 'No manual browser downloads needed. Update SKP VPN directly inside the app with one tap.'}
             </span>
           </div>
 
           {/* Installed vs Latest Version Comparison */}
-          <div className="grid grid-cols-2 gap-3 bg-slate-50 dark:bg-[#13291F] rounded-xl p-3.5 border border-slate-100 dark:border-emerald-900/40">
+          <div className="grid grid-cols-2 gap-3 bg-slate-50 dark:bg-[#13291F] rounded-xl p-3.5 border border-slate-200/70 dark:border-emerald-900/40">
             <div>
               <div className="text-[11px] text-slate-500 dark:text-slate-400">
                 {language === 'ur' ? 'موجودہ ورژن' : 'Installed Version'}
@@ -268,7 +346,7 @@ export const UpdatesModal: React.FC<UpdatesModalProps> = ({
                   ? '...'
                   : releaseInfo?.buildNumber
                   ? `v1.${releaseInfo.buildNumber}.0`
-                  : '—'}
+                  : otaVersion || '—'}
               </div>
               {releaseInfo?.publishedAt && (
                 <div className="text-[11px] text-slate-400 dark:text-slate-500 truncate">
@@ -278,123 +356,217 @@ export const UpdatesModal: React.FC<UpdatesModalProps> = ({
             </div>
           </div>
 
-          {/* Live Status Notice */}
-          {checking || isDownloadingOta ? (
-            <div className="flex items-center gap-2.5 p-3.5 rounded-xl bg-slate-50 dark:bg-[#13291F] text-slate-700 dark:text-slate-200 text-xs font-medium">
-              <RefreshCw className="w-4 h-4 text-[#15803D] dark:text-emerald-400 animate-spin shrink-0" />
-              <span className={language === 'ur' ? 'font-urdu' : ''}>
-                {isDownloadingOta
-                  ? language === 'ur'
-                    ? 'نئی اپڈیٹ خودکار انسٹال ہو رہی ہے...'
-                    : 'Applying instant auto-update now...'
-                  : language === 'ur'
-                  ? 'نئی اپڈیٹ چیک کی جا رہی ہے...'
-                  : 'Checking for new SKP VPN updates...'}
-              </span>
+          {/* Live In-App Download & Install Progress Bar */}
+          {isBusyUpdating && (
+            <div className="p-3.5 rounded-xl bg-emerald-50/90 dark:bg-[#13291F] border border-emerald-200 dark:border-emerald-800/60 space-y-2.5">
+              <div className="flex items-center justify-between gap-2 text-xs font-semibold text-[#0B5D32] dark:text-emerald-300">
+                <span className="flex items-center gap-2 min-w-0">
+                  <RefreshCw className="w-4 h-4 animate-spin text-[#15803D] dark:text-emerald-400 shrink-0" />
+                  <span className={`truncate ${language === 'ur' ? 'font-urdu' : ''}`}>
+                    {otaStatus === 'downloading_apk'
+                      ? language === 'ur'
+                        ? 'ایپ کے اندر نئی اپڈیٹ ڈاؤنلوڈ ہو رہی ہے...'
+                        : 'Downloading update inside SKP VPN...'
+                      : otaStatus === 'installing_apk'
+                      ? language === 'ur'
+                        ? 'اینڈرائیڈ انسٹالر کھولا جا رہا ہے...'
+                        : 'Opening Android system update prompt...'
+                      : otaStatus === 'downloading'
+                      ? language === 'ur'
+                        ? 'فوری آٹو اپڈیٹ انسٹال ہو رہی ہے...'
+                        : 'Applying instant in-app update...'
+                      : language === 'ur'
+                      ? 'اپڈیٹ چیک اور سنک ہو رہی ہے...'
+                      : 'Checking & syncing latest update...'}
+                  </span>
+                </span>
+                <span className="font-mono-tabular shrink-0">{displayProgress}%</span>
+              </div>
+
+              <progress
+                value={displayProgress}
+                max={100}
+                className="w-full h-2.5 rounded-full overflow-hidden appearance-none [&::-webkit-progress-bar]:bg-emerald-200/70 dark:[&::-webkit-progress-bar]:bg-emerald-950 [&::-webkit-progress-value]:bg-[#15803D] dark:[&::-webkit-progress-value]:bg-emerald-400 [&::-webkit-progress-value]:rounded-full [&::-moz-progress-bar]:bg-[#15803D]"
+              />
             </div>
-          ) : checkError ? (
-            <div className="flex items-start gap-2.5 p-3.5 rounded-xl bg-amber-50 dark:bg-amber-950/40 border border-amber-200 dark:border-amber-800/60 text-amber-900 dark:text-amber-200 text-xs">
-              <AlertCircle className="w-4 h-4 text-amber-600 dark:text-amber-400 shrink-0 mt-0.5" />
-              <span className={language === 'ur' ? 'font-urdu' : ''}>
-                {checkError}
-              </span>
+          )}
+
+          {/* One-Time Android Install Permission Helper */}
+          {otaStatus === 'permission_needed' && (
+            <div className="p-3.5 rounded-xl bg-amber-50 dark:bg-amber-950/40 border border-amber-300 dark:border-amber-700/70 text-amber-950 dark:text-amber-100 text-xs space-y-2.5">
+              <div className="flex items-start gap-2">
+                <ShieldCheck className="w-4 h-4 text-amber-600 dark:text-amber-400 shrink-0 mt-0.5" />
+                <span className={language === 'ur' ? 'font-urdu' : ''}>
+                  {language === 'ur'
+                    ? 'اپڈیٹ 100% ڈاؤنلوڈ ہو چکی ہے! اینڈرائیڈ سیٹنگ میں "Allow from this source" آن کریں، واپس آتے ہی اپڈیٹ خودکار انسٹال ہو جائے گی۔'
+                    : 'Update downloaded (100%)! Enable "Allow from this source" for SKP VPN — the update will install automatically.'}
+                </span>
+              </div>
+              <button
+                type="button"
+                onClick={() => nativeInstallDownloadedApkIfReady()}
+                className="w-full min-h-[42px] px-3 py-2 rounded-lg bg-amber-600 hover:bg-amber-700 text-white text-xs font-semibold transition-colors cursor-pointer whitespace-nowrap"
+              >
+                {language === 'ur'
+                  ? 'ڈاؤنلوڈ شدہ اپڈیٹ ابھی انسٹال کریں'
+                  : 'Install Downloaded Update Now'}
+              </button>
             </div>
-          ) : isUpToDate ? (
-            <div className="flex items-center gap-2.5 p-3.5 rounded-xl bg-emerald-50 dark:bg-emerald-950/40 border border-emerald-200 dark:border-emerald-800/60 text-emerald-900 dark:text-emerald-200 text-xs font-medium">
-              <CheckCircle2 className="w-4 h-4 text-[#15803D] dark:text-emerald-400 shrink-0" />
+          )}
+
+          {/* Installer Opened Confirmation */}
+          {otaStatus === 'installer_opened' && (
+            <div className="flex items-start gap-2.5 p-3.5 rounded-xl bg-emerald-50 dark:bg-emerald-950/40 border border-emerald-200 dark:border-emerald-800/60 text-emerald-900 dark:text-emerald-200 text-xs font-medium">
+              <CheckCircle2 className="w-4 h-4 text-[#15803D] dark:text-emerald-400 shrink-0 mt-0.5" />
               <span className={language === 'ur' ? 'font-urdu' : ''}>
                 {language === 'ur'
-                  ? `آپ کے پاس تازہ ترین ورژن (v1.${releaseInfo?.buildNumber}.0) موجود ہے!`
-                  : `SKP VPN is up to date (v1.${releaseInfo?.buildNumber}.0).`}
+                  ? 'اینڈرائیڈ اپڈیٹ ڈائیلاگ کھل گیا ہے — سکرین پر "Update" دبائیں۔'
+                  : 'Android update prompt opened — tap "Update" on the system dialog to finish.'}
               </span>
             </div>
-          ) : isNewerAvailable ? (
-            <div className="flex items-start gap-2.5 p-3.5 rounded-xl bg-emerald-50 dark:bg-emerald-950/40 border border-emerald-200 dark:border-emerald-800/60 text-emerald-900 dark:text-emerald-200 text-xs font-medium">
-              <ArrowUpCircle className="w-4 h-4 text-[#15803D] dark:text-emerald-400 shrink-0 mt-0.5" />
-              <div className="space-y-0.5">
-                <div
-                  className={`font-bold text-[#0B5D32] dark:text-emerald-300 ${
-                    language === 'ur' ? 'font-urdu' : ''
-                  }`}
-                >
-                  {language === 'ur'
-                    ? `نئی اپڈیٹ دستیاب ہے: v1.${releaseInfo?.buildNumber}.0`
-                    : `New Update Available: v1.${releaseInfo?.buildNumber}.0`}
-                </div>
-                {releaseInfo?.apkSizeBytes && (
-                  <div className="text-[11px] text-emerald-700 dark:text-emerald-400 font-mono-tabular">
-                    Full APK: {formatBytesCompact(releaseInfo.apkSizeBytes)}
-                  </div>
-                )}
-              </div>
-            </div>
-          ) : null}
+          )}
 
-          {/* Action Buttons */}
+          {/* Native OTA / APK Error Notice */}
+          {otaStatus === 'error' && otaError && (
+            <div className="flex items-start gap-2.5 p-3.5 rounded-xl bg-rose-50 dark:bg-rose-950/40 border border-rose-200 dark:border-rose-800/60 text-rose-800 dark:text-rose-200 text-xs">
+              <AlertCircle className="w-4 h-4 text-rose-600 dark:text-rose-400 shrink-0 mt-0.5" />
+              <span>{otaError}</span>
+            </div>
+          )}
+
+          {/* Version Check Status */}
+          {!isBusyUpdating && otaStatus !== 'permission_needed' && (
+            <>
+              {checking ? (
+                <div className="flex items-center gap-2.5 p-3.5 rounded-xl bg-slate-50 dark:bg-[#13291F] text-slate-700 dark:text-slate-200 text-xs font-medium">
+                  <RefreshCw className="w-4 h-4 text-[#15803D] dark:text-emerald-400 animate-spin shrink-0" />
+                  <span className={language === 'ur' ? 'font-urdu' : ''}>
+                    {language === 'ur'
+                      ? 'نئی اپڈیٹ چیک کی جا رہی ہے...'
+                      : 'Checking for new SKP VPN updates...'}
+                  </span>
+                </div>
+              ) : checkError ? (
+                <div className="flex items-start gap-2.5 p-3.5 rounded-xl bg-amber-50 dark:bg-amber-950/40 border border-amber-200 dark:border-amber-800/60 text-amber-900 dark:text-amber-200 text-xs">
+                  <AlertCircle className="w-4 h-4 text-amber-600 dark:text-amber-400 shrink-0 mt-0.5" />
+                  <span className={language === 'ur' ? 'font-urdu' : ''}>
+                    {checkError}
+                  </span>
+                </div>
+              ) : isUpToDate ? (
+                <div className="flex items-center gap-2.5 p-3.5 rounded-xl bg-emerald-50 dark:bg-emerald-950/40 border border-emerald-200 dark:border-emerald-800/60 text-emerald-900 dark:text-emerald-200 text-xs font-medium">
+                  <CheckCircle2 className="w-4 h-4 text-[#15803D] dark:text-emerald-400 shrink-0" />
+                  <span className={language === 'ur' ? 'font-urdu' : ''}>
+                    {language === 'ur'
+                      ? `آپ کی ایپ تازہ ترین ورژن (v1.${releaseInfo?.buildNumber}.0) پر اپڈیٹ ہے!`
+                      : `SKP VPN is up to date (v1.${releaseInfo?.buildNumber}.0).`}
+                  </span>
+                </div>
+              ) : isNewerAvailable ? (
+                <div className="flex items-start gap-2.5 p-3.5 rounded-xl bg-emerald-50 dark:bg-emerald-950/40 border border-emerald-200 dark:border-emerald-800/60 text-emerald-900 dark:text-emerald-200 text-xs font-medium">
+                  <ArrowUpCircle className="w-4 h-4 text-[#15803D] dark:text-emerald-400 shrink-0 mt-0.5" />
+                  <div className="space-y-0.5">
+                    <div
+                      className={`font-bold text-[#0B5D32] dark:text-emerald-300 ${
+                        language === 'ur' ? 'font-urdu' : ''
+                      }`}
+                    >
+                      {language === 'ur'
+                        ? `نئی اپڈیٹ دستیاب ہے: v1.${releaseInfo?.buildNumber}.0`
+                        : `New Update Ready: v1.${releaseInfo?.buildNumber}.0`}
+                    </div>
+                    {releaseInfo?.apkSizeBytes && (
+                      <div className="text-[11px] text-emerald-700 dark:text-emerald-400 font-mono-tabular">
+                        Package size · {formatBytesCompact(releaseInfo.apkSizeBytes)}
+                      </div>
+                    )}
+                  </div>
+                </div>
+              ) : null}
+            </>
+          )}
+
+          {/* In-App Update Action Buttons */}
           <div className="flex flex-col gap-2.5 pt-1">
-            {isNativeAndroidVpn() ? (
+            {nativeAndroid ? (
               <>
                 <button
                   type="button"
-                  disabled={checking || isDownloadingOta}
-                  onClick={() => {
-                    triggerNativeOtaUpdateCheck();
-                    checkLatestUpdate();
-                  }}
-                  className="w-full min-h-[46px] px-4 py-2.5 rounded-xl bg-[#15803D] hover:bg-[#116932] disabled:opacity-60 text-white text-sm font-semibold flex items-center justify-center gap-2 transition-colors cursor-pointer"
+                  disabled={isBusyUpdating}
+                  onClick={handleSmartInAppUpdate}
+                  className="btn-3d-emerald w-full min-h-[48px] px-4 py-2.5 rounded-xl bg-[#15803D] hover:bg-[#116932] disabled:opacity-60 text-white text-sm font-semibold flex items-center justify-center gap-2 transition-all cursor-pointer whitespace-nowrap"
                 >
                   <Zap className="w-4 h-4 shrink-0" />
                   <span className={language === 'ur' ? 'font-urdu' : ''}>
                     {language === 'ur'
-                      ? 'فوری آٹو اپڈیٹ چیک کریں'
-                      : 'Sync Instant Update Now'}
+                      ? 'ایپ ابھی فوری اپڈیٹ کریں (Instant Update)'
+                      : 'Instant Auto-Update Now'}
                   </span>
                 </button>
 
                 <button
                   type="button"
-                  onClick={() => openNativeExternalUrl(targetUpdateUrl)}
-                  className="w-full min-h-[42px] px-4 py-2 rounded-xl border border-slate-200 dark:border-emerald-900/50 hover:bg-slate-50 dark:hover:bg-[#13291F] text-slate-700 dark:text-slate-200 text-xs font-semibold flex items-center justify-center gap-2 transition-colors cursor-pointer"
+                  disabled={isBusyUpdating}
+                  onClick={handleDirectInAppApkInstall}
+                  className="w-full min-h-[46px] px-4 py-2.5 rounded-xl bg-slate-100 dark:bg-[#13291F] hover:bg-emerald-50 dark:hover:bg-emerald-500/15 border border-slate-200/80 dark:border-emerald-900/50 disabled:opacity-60 text-slate-900 dark:text-slate-100 text-xs font-semibold flex items-center justify-center gap-2 transition-colors cursor-pointer whitespace-nowrap"
                 >
-                  <ArrowUpCircle className="w-3.5 h-3.5 shrink-0 text-[#15803D] dark:text-emerald-400" />
+                  <Download className="w-4 h-4 shrink-0 text-[#15803D] dark:text-emerald-400" />
                   <span className={language === 'ur' ? 'font-urdu' : ''}>
-                    {language === 'ur'
-                      ? 'مکمل نئی APK انسٹال کریں'
-                      : 'Install Full Latest APK'}
+                    {supportsDirectApkInstall
+                      ? language === 'ur'
+                        ? 'مکمل نئی ایپ اندر ہی انسٹال کریں (Direct APK)'
+                        : 'Update Full App Inside SKP VPN'
+                      : language === 'ur'
+                      ? 'پہلی بار آٹو اپڈیٹر APK انسٹال کریں'
+                      : 'Install Auto-Updater APK (One-Time)'}
                   </span>
                 </button>
               </>
             ) : (
               <>
-                <a
-                  href={targetUpdateUrl}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="w-full min-h-[46px] px-4 py-2.5 rounded-xl bg-[#15803D] hover:bg-[#116932] text-white text-sm font-semibold flex items-center justify-center gap-2 transition-colors cursor-pointer"
-                >
-                  <ExternalLink className="w-4 h-4 shrink-0" />
-                  <span className={language === 'ur' ? 'font-urdu' : ''}>
-                    {language === 'ur'
-                      ? 'تازہ ترین اپڈیٹ حاصل کریں'
-                      : 'Get Latest App Update'}
-                  </span>
-                </a>
-
                 <button
                   type="button"
-                  disabled={checking}
-                  onClick={checkLatestUpdate}
-                  className="w-full min-h-[42px] px-4 py-2 rounded-xl border border-slate-200 dark:border-emerald-900/50 hover:bg-slate-50 dark:hover:bg-[#13291F] disabled:opacity-60 text-slate-700 dark:text-slate-200 text-xs font-semibold flex items-center justify-center gap-2 transition-colors cursor-pointer"
+                  disabled={isBusyUpdating}
+                  onClick={handleSmartInAppUpdate}
+                  className="btn-3d-emerald w-full min-h-[48px] px-4 py-2.5 rounded-xl bg-[#15803D] hover:bg-[#116932] disabled:opacity-60 text-white text-sm font-semibold flex items-center justify-center gap-2 transition-all cursor-pointer whitespace-nowrap"
                 >
-                  <RefreshCw
-                    className={`w-3.5 h-3.5 ${checking ? 'animate-spin' : ''}`}
-                  />
+                  <Zap className="w-4 h-4 shrink-0" />
                   <span className={language === 'ur' ? 'font-urdu' : ''}>
                     {language === 'ur'
-                      ? 'دوبارہ اپڈیٹ چیک کریں'
-                      : 'Check Again'}
+                      ? 'ایپ ابھی اپڈیٹ کریں (Update Now)'
+                      : 'Update App Now'}
                   </span>
                 </button>
+
+                <div className="grid grid-cols-2 gap-2">
+                  <button
+                    type="button"
+                    disabled={checking || isBusyUpdating}
+                    onClick={checkLatestUpdate}
+                    className="min-h-[44px] px-3 py-2 rounded-xl border border-slate-200 dark:border-emerald-900/50 hover:bg-slate-50 dark:hover:bg-[#13291F] disabled:opacity-60 text-slate-700 dark:text-slate-200 text-xs font-semibold flex items-center justify-center gap-1.5 transition-colors cursor-pointer whitespace-nowrap"
+                  >
+                    <RefreshCw
+                      className={`w-3.5 h-3.5 shrink-0 ${
+                        checking ? 'animate-spin' : ''
+                      }`}
+                    />
+                    <span className={language === 'ur' ? 'font-urdu' : ''}>
+                      {language === 'ur' ? 'دوبارہ چیک کریں' : 'Check Again'}
+                    </span>
+                  </button>
+
+                  <a
+                    href={targetUpdateUrl}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="min-h-[44px] px-3 py-2 rounded-xl border border-slate-200 dark:border-emerald-900/50 hover:bg-slate-50 dark:hover:bg-[#13291F] text-slate-700 dark:text-slate-200 text-xs font-semibold flex items-center justify-center gap-1.5 transition-colors cursor-pointer whitespace-nowrap"
+                  >
+                    <Download className="w-3.5 h-3.5 shrink-0 text-[#15803D] dark:text-emerald-400" />
+                    <span className={language === 'ur' ? 'font-urdu' : ''}>
+                      {language === 'ur' ? 'اینڈرائیڈ APK' : 'Android APK'}
+                    </span>
+                  </a>
+                </div>
               </>
             )}
           </div>

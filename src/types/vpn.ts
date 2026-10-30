@@ -71,8 +71,20 @@ export interface NativeVpnEventPayload {
   downMbps?: number;
   upMbps?: number;
   durationSec?: number;
-  otaStatus?: 'idle' | 'downloading' | 'applied' | 'up_to_date';
+  otaStatus?:
+    | 'idle'
+    | 'checking'
+    | 'downloading'
+    | 'downloading_apk'
+    | 'installing_apk'
+    | 'permission_needed'
+    | 'installer_opened'
+    | 'applied'
+    | 'up_to_date'
+    | 'error';
   otaVersion?: string;
+  otaProgress?: number;
+  otaError?: string;
   installedBuild?: number;
 }
 

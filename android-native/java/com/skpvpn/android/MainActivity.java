@@ -5,6 +5,7 @@ import android.content.Intent;
 import android.content.pm.PackageManager;
 import android.os.Build;
 import android.os.Bundle;
+import android.webkit.WebSettings;
 import android.webkit.WebView;
 import com.getcapacitor.BridgeActivity;
 import java.io.File;
@@ -23,13 +24,16 @@ public class MainActivity extends BridgeActivity {
 
         if (getBridge() != null && getBridge().getWebView() != null) {
             WebView webView = getBridge().getWebView();
+            webView.getSettings().setCacheMode(WebSettings.LOAD_NO_CACHE);
             webView.addJavascriptInterface(vpnBridge, "SkpNativeVpn");
             vpnBridge.attachActivity(this, webView);
+            purgeStaleServiceWorkers(webView);
 
             String savedOtaDir = vpnBridge.getActiveValidOtaDir();
             if (savedOtaDir != null) {
                 getBridge().setServerBasePath(savedOtaDir);
             } else {
+                webView.clearCache(true);
                 webView.reload();
             }
         }
@@ -44,6 +48,7 @@ public class MainActivity extends BridgeActivity {
         if (vpnBridge != null) {
             WebView webView = (getBridge() != null) ? getBridge().getWebView() : null;
             vpnBridge.attachActivity(this, webView);
+            vpnBridge.resumePendingApkInstallIfAllowed();
             vpnBridge.emitCurrentState();
             vpnBridge.checkForOtaUpdateAsync(false);
         }
@@ -55,8 +60,11 @@ public class MainActivity extends BridgeActivity {
                 if (getBridge() != null && basePath != null) {
                     File indexFile = new File(basePath, "index.html");
                     if (indexFile.exists() && indexFile.length() > 0) {
-                        if (getBridge().getWebView() != null) {
-                            getBridge().getWebView().clearCache(true);
+                        WebView webView = getBridge().getWebView();
+                        if (webView != null) {
+                            webView.getSettings().setCacheMode(WebSettings.LOAD_NO_CACHE);
+                            purgeStaleServiceWorkers(webView);
+                            webView.clearCache(true);
                         }
                         getBridge().setServerBasePath(basePath);
                     }
@@ -64,6 +72,19 @@ public class MainActivity extends BridgeActivity {
             } catch (Exception ignored) {
             }
         });
+    }
+
+    private void purgeStaleServiceWorkers(WebView webView) {
+        if (webView == null) return;
+        try {
+            String cleanupJs =
+                "(function(){try{" +
+                "if('serviceWorker' in navigator){navigator.serviceWorker.getRegistrations().then(function(r){for(var i=0;i<r.length;i++){r[i].unregister();}}).catch(function(){});}" +
+                "if('caches' in window){caches.keys().then(function(k){for(var j=0;j<k.length;j++){caches.delete(k[j]);}}).catch(function(){});}" +
+                "}catch(e){}})();";
+            webView.evaluateJavascript(cleanupJs, null);
+        } catch (Exception ignored) {
+        }
     }
 
     public void launchVpnPermissionDialog(Intent prepareIntent) {

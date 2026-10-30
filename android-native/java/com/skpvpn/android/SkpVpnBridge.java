@@ -17,6 +17,7 @@ import android.provider.Settings;
 import android.util.Log;
 import android.webkit.JavascriptInterface;
 import android.webkit.WebView;
+import androidx.core.content.FileProvider;
 
 import com.wireguard.android.backend.GoBackend;
 import com.wireguard.android.backend.Statistics;
@@ -69,8 +70,10 @@ public class SkpVpnBridge {
     private static final String CHANNEL_ID = "skp_vpn_tunnel_status";
     private static final int NOTIFICATION_ID = 4401;
 
+    private static final String GITHUB_OTA_COMMIT_API = "https://api.github.com/repos/shahidpitafiskp-ui/Skp-vpn/commits/ota-live";
     private static final String OTA_MANIFEST_URL = "https://raw.githubusercontent.com/shahidpitafiskp-ui/Skp-vpn/ota-live/ota-manifest.json";
     private static final String OTA_BUNDLE_URL = "https://raw.githubusercontent.com/shahidpitafiskp-ui/Skp-vpn/ota-live/ota-bundle.zip";
+    private static final String DEFAULT_DIRECT_APK_URL = "https://github.com/shahidpitafiskp-ui/Skp-vpn/releases/latest/download/app-debug.apk";
 
     // Pre-registered WireGuard emergency fallback profile if ISP blocks initial key registration prior to VPN activation
     private static final String FALLBACK_PRIV_KEY = "eCHsg7bPjbcqcShDRokQYEloCr6oKDX9kn3DDzKoBEE=";
@@ -115,8 +118,13 @@ public class SkpVpnBridge {
     private volatile boolean connectingInProgress = false;
     private volatile long connectedSinceMs = 0L;
 
+    private final AtomicBoolean apkDownloadInProgress = new AtomicBoolean(false);
+
     private volatile String otaStatus = "idle";
     private volatile String otaVersion = "";
+    private volatile int otaProgress = 0;
+    private volatile String otaError = "";
+    private volatile File pendingApkInstallFile = null;
     private volatile long lastOtaCheckMs = 0L;
 
     private volatile long lastRxBytes = 0L;
@@ -205,6 +213,7 @@ public class SkpVpnBridge {
         }
     }
 
+    @SuppressWarnings("deprecation")
     private int getApkVersionCode() {
         try {
             PackageInfo pInfo = appContext.getPackageManager().getPackageInfo(appContext.getPackageName(), 0);
@@ -239,9 +248,13 @@ public class SkpVpnBridge {
 
     @JavascriptInterface
     public int getInstalledBuildNumber() {
+        int apkVer = getApkVersionCode();
+        if (getActiveValidOtaDir() == null) {
+            return apkVer;
+        }
         SharedPreferences prefs = appContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE);
         int otaRun = prefs.getInt("ota_run_number", 0);
-        return Math.max(getApkVersionCode(), otaRun);
+        return Math.max(apkVer, otaRun);
     }
 
     @JavascriptInterface
@@ -249,15 +262,316 @@ public class SkpVpnBridge {
         checkForOtaUpdateAsync(true);
     }
 
+    @JavascriptInterface
+    public void downloadAndInstallApk(String apkUrl) {
+        final String targetUrl = (apkUrl != null && !apkUrl.trim().isEmpty())
+            ? apkUrl.trim()
+            : DEFAULT_DIRECT_APK_URL;
+
+        if (!apkDownloadInProgress.compareAndSet(false, true)) {
+            return;
+        }
+
+        otaStatus = "downloading_apk";
+        otaProgress = 1;
+        otaError = "";
+        emitCurrentState();
+
+        Executors.newSingleThreadExecutor().execute(() -> {
+            HttpURLConnection conn = null;
+            try {
+                File updatesDir = new File(appContext.getCacheDir(), "apk_updates");
+                if (!updatesDir.exists()) {
+                    // noinspection ResultOfMethodCallIgnored
+                    updatesDir.mkdirs();
+                }
+
+                File partFile = new File(updatesDir, "skp-vpn-update.apk.part");
+                File finalApk = new File(updatesDir, "skp-vpn-update.apk");
+                if (partFile.exists()) {
+                    // noinspection ResultOfMethodCallIgnored
+                    partFile.delete();
+                }
+
+                conn = openConnectionFollowRedirects(targetUrl, 8, 15000, 30000);
+                int status = conn.getResponseCode();
+                if (status != 200) {
+                    throw new Exception("Update download failed (HTTP " + status + ")");
+                }
+
+                long contentLength = parseContentLength(conn);
+                long fallbackEstimateBytes = 18_500_000L;
+                long totalExpected = contentLength > 0 ? contentLength : fallbackEstimateBytes;
+
+                long downloaded = 0L;
+                long lastEmitMs = 0L;
+
+                try (InputStream is = new BufferedInputStream(conn.getInputStream());
+                     FileOutputStream fos = new FileOutputStream(partFile)) {
+                    byte[] buffer = new byte[32768];
+                    int read;
+                    while ((read = is.read(buffer)) != -1) {
+                        fos.write(buffer, 0, read);
+                        downloaded += read;
+                        long now = System.currentTimeMillis();
+                        if (now - lastEmitMs >= 160L) {
+                            lastEmitMs = now;
+                            int pct = (int) Math.min(99L, Math.max(1L, (downloaded * 100L) / totalExpected));
+                            otaProgress = pct;
+                            otaStatus = "downloading_apk";
+                            emitCurrentState();
+                        }
+                    }
+                    fos.getFD().sync();
+                }
+
+                if (!partFile.exists() || partFile.length() < 500_000L) {
+                    // noinspection ResultOfMethodCallIgnored
+                    partFile.delete();
+                    throw new Exception("Downloaded APK file was incomplete. Check internet and retry.");
+                }
+
+                if (finalApk.exists()) {
+                    // noinspection ResultOfMethodCallIgnored
+                    finalApk.delete();
+                }
+                if (!partFile.renameTo(finalApk)) {
+                    try (InputStream fis = new FileInputStream(partFile);
+                         FileOutputStream fos = new FileOutputStream(finalApk)) {
+                        byte[] copyBuf = new byte[32768];
+                        int n;
+                        while ((n = fis.read(copyBuf)) != -1) {
+                            fos.write(copyBuf, 0, n);
+                        }
+                        fos.getFD().sync();
+                    }
+                    // noinspection ResultOfMethodCallIgnored
+                    partFile.delete();
+                }
+
+                otaProgress = 100;
+                otaStatus = "installing_apk";
+                otaError = "";
+                emitCurrentState();
+
+                promptInstallApkFile(finalApk);
+            } catch (Exception e) {
+                Log.e(TAG, "In-app APK download/install failed", e);
+                otaStatus = "error";
+                otaProgress = 0;
+                otaError = e.getMessage() != null ? e.getMessage() : "Could not download update APK.";
+                emitCurrentState();
+            } finally {
+                if (conn != null) conn.disconnect();
+                apkDownloadInProgress.set(false);
+            }
+        });
+    }
+
+    @JavascriptInterface
+    public void installDownloadedApkIfReady() {
+        File updatesDir = new File(appContext.getCacheDir(), "apk_updates");
+        File finalApk = pendingApkInstallFile != null
+            ? pendingApkInstallFile
+            : new File(updatesDir, "skp-vpn-update.apk");
+        if (finalApk.exists() && finalApk.length() > 500_000L) {
+            promptInstallApkFile(finalApk);
+        } else {
+            downloadAndInstallApk(DEFAULT_DIRECT_APK_URL);
+        }
+    }
+
+    public void resumePendingApkInstallIfAllowed() {
+        File pending = pendingApkInstallFile;
+        if (pending == null || !pending.exists()) {
+            return;
+        }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            if (!appContext.getPackageManager().canRequestPackageInstalls()) {
+                return;
+            }
+        }
+        promptInstallApkFile(pending);
+    }
+
+    private void promptInstallApkFile(final File apkFile) {
+        if (apkFile == null || !apkFile.exists()) return;
+
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                if (!appContext.getPackageManager().canRequestPackageInstalls()) {
+                    pendingApkInstallFile = apkFile;
+                    otaStatus = "permission_needed";
+                    otaProgress = 100;
+                    otaError = "";
+                    emitCurrentState();
+
+                    final Intent permIntent = new Intent(
+                        Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES,
+                        Uri.parse("package:" + appContext.getPackageName())
+                    );
+                    MainActivity activity = activityRef != null ? activityRef.get() : null;
+                    if (activity != null) {
+                        activity.runOnUiThread(() -> {
+                            try {
+                                activity.startActivity(permIntent);
+                            } catch (Exception ex) {
+                                permIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+                                appContext.startActivity(permIntent);
+                            }
+                        });
+                    } else {
+                        permIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+                        appContext.startActivity(permIntent);
+                    }
+                    return;
+                }
+            }
+
+            pendingApkInstallFile = null;
+            final Uri apkUri = FileProvider.getUriForFile(
+                appContext,
+                appContext.getPackageName() + ".fileprovider",
+                apkFile
+            );
+
+            final Intent installIntent = new Intent(Intent.ACTION_VIEW);
+            installIntent.setDataAndType(apkUri, "application/vnd.android.package-archive");
+            installIntent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+            installIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+            installIntent.putExtra(Intent.EXTRA_NOT_UNKNOWN_SOURCE, true);
+
+            MainActivity activity = activityRef != null ? activityRef.get() : null;
+            if (activity != null) {
+                activity.runOnUiThread(() -> {
+                    try {
+                        activity.startActivity(installIntent);
+                        otaStatus = "installer_opened";
+                        emitCurrentState();
+                    } catch (Exception ex) {
+                        Log.e(TAG, "Failed launching package installer from activity", ex);
+                        otaStatus = "error";
+                        otaError = "Unable to open Android installer: " + ex.getMessage();
+                        emitCurrentState();
+                    }
+                });
+            } else {
+                appContext.startActivity(installIntent);
+                otaStatus = "installer_opened";
+                emitCurrentState();
+            }
+        } catch (Exception e) {
+            Log.e(TAG, "Error preparing APK installer Uri", e);
+            otaStatus = "error";
+            otaError = "Installer error: " + (e.getMessage() != null ? e.getMessage() : e.toString());
+            emitCurrentState();
+        }
+    }
+
+    private HttpURLConnection openConnectionFollowRedirects(
+        String initialUrl,
+        int maxRedirects,
+        int connectTimeoutMs,
+        int readTimeoutMs
+    ) throws Exception {
+        String currentUrl = initialUrl;
+        for (int hop = 0; hop <= maxRedirects; hop++) {
+            URL url = new URL(currentUrl);
+            HttpURLConnection conn = (HttpURLConnection) url.openConnection();
+            conn.setInstanceFollowRedirects(false);
+            conn.setConnectTimeout(connectTimeoutMs);
+            conn.setReadTimeout(readTimeoutMs);
+            conn.setUseCaches(false);
+            conn.setRequestProperty("Cache-Control", "no-cache, no-store, must-revalidate");
+            conn.setRequestProperty("Pragma", "no-cache");
+            conn.setRequestProperty("User-Agent", "SKP-VPN-Android-Updater/1.0");
+            conn.setRequestProperty("Accept", "*/*");
+
+            int code = conn.getResponseCode();
+            if (code == HttpURLConnection.HTTP_MOVED_PERM ||
+                code == HttpURLConnection.HTTP_MOVED_TEMP ||
+                code == HttpURLConnection.HTTP_SEE_OTHER ||
+                code == 307 ||
+                code == 308) {
+                String location = conn.getHeaderField("Location");
+                conn.disconnect();
+                if (location == null || location.isEmpty()) {
+                    throw new Exception("Redirect missing Location header");
+                }
+                URL nextUrl = new URL(url, location);
+                currentUrl = nextUrl.toExternalForm();
+                continue;
+            }
+            return conn;
+        }
+        throw new Exception("Too many HTTP redirects while fetching update");
+    }
+
+    private long parseContentLength(HttpURLConnection conn) {
+        try {
+            String header = conn.getHeaderField("Content-Length");
+            if (header != null && !header.trim().isEmpty()) {
+                return Long.parseLong(header.trim());
+            }
+        } catch (Exception ignored) {
+        }
+        return conn.getContentLength();
+    }
+
+    private String resolveLatestOtaCommitSha() {
+        HttpURLConnection apiConn = null;
+        try {
+            URL url = new URL(GITHUB_OTA_COMMIT_API + "?t=" + System.currentTimeMillis());
+            apiConn = (HttpURLConnection) url.openConnection();
+            apiConn.setConnectTimeout(4500);
+            apiConn.setReadTimeout(4500);
+            apiConn.setUseCaches(false);
+            apiConn.setRequestProperty("Accept", "application/vnd.github+json");
+            apiConn.setRequestProperty("Cache-Control", "no-cache");
+            apiConn.setRequestProperty("User-Agent", "SKP-VPN-Android-Updater/1.0");
+
+            if (apiConn.getResponseCode() == 200) {
+                StringBuilder sb = new StringBuilder();
+                try (BufferedReader br = new BufferedReader(
+                    new InputStreamReader(apiConn.getInputStream(), StandardCharsets.UTF_8)
+                )) {
+                    String line;
+                    while ((line = br.readLine()) != null) {
+                        sb.append(line);
+                    }
+                }
+                JSONObject obj = new JSONObject(sb.toString());
+                String sha = obj.optString("sha", "").trim();
+                if (sha.length() >= 7) {
+                    return sha;
+                }
+            }
+        } catch (Exception ignored) {
+        } finally {
+            if (apiConn != null) apiConn.disconnect();
+        }
+        return "";
+    }
+
     public void checkForOtaUpdateAsync(final boolean forceNow) {
+        if (apkDownloadInProgress.get()) {
+            return;
+        }
         long now = System.currentTimeMillis();
-        if (!forceNow && (now - lastOtaCheckMs) < 15000L) {
+        if (!forceNow && (now - lastOtaCheckMs) < 12000L) {
             return;
         }
         if (!otaCheckInProgress.compareAndSet(false, true)) {
             return;
         }
         lastOtaCheckMs = now;
+
+        if (forceNow) {
+            otaStatus = "checking";
+            otaProgress = 0;
+            otaError = "";
+            emitCurrentState();
+        }
 
         otaExecutor.execute(() -> {
             HttpURLConnection manifestConn = null;
@@ -266,15 +580,23 @@ public class SkpVpnBridge {
                 int currentBuild = getInstalledBuildNumber();
                 String currentCommit = prefs.getString("ota_commit", "");
 
-                URL mUrl = new URL(OTA_MANIFEST_URL + "?t=" + System.currentTimeMillis());
-                manifestConn = (HttpURLConnection) mUrl.openConnection();
-                manifestConn.setConnectTimeout(5000);
-                manifestConn.setReadTimeout(5000);
-                manifestConn.setUseCaches(false);
-                manifestConn.setRequestProperty("Cache-Control", "no-cache");
+                // Resolve immutable commit SHA via GitHub API to bypass 5-min raw.githubusercontent CDN cache
+                String latestOtaRefSha = resolveLatestOtaCommitSha();
+                String manifestTargetUrl = !latestOtaRefSha.isEmpty()
+                    ? ("https://raw.githubusercontent.com/shahidpitafiskp-ui/Skp-vpn/" + latestOtaRefSha + "/ota-manifest.json")
+                    : (OTA_MANIFEST_URL + "?t=" + System.currentTimeMillis());
+                String bundleTargetUrl = !latestOtaRefSha.isEmpty()
+                    ? ("https://raw.githubusercontent.com/shahidpitafiskp-ui/Skp-vpn/" + latestOtaRefSha + "/ota-bundle.zip")
+                    : (OTA_BUNDLE_URL + "?t=" + System.currentTimeMillis());
 
+                manifestConn = openConnectionFollowRedirects(manifestTargetUrl, 5, 6000, 6000);
                 if (manifestConn.getResponseCode() != 200) {
-                    otaStatus = "idle";
+                    if (forceNow) {
+                        otaStatus = "error";
+                        otaError = "Update manifest unavailable (HTTP " + manifestConn.getResponseCode() + "). Use Full App Update below.";
+                    } else {
+                        otaStatus = "idle";
+                    }
                     emitCurrentState();
                     return;
                 }
@@ -298,12 +620,16 @@ public class SkpVpnBridge {
 
                 if (!hasNewerBuild || remoteRun <= 0) {
                     otaStatus = "up_to_date";
+                    otaProgress = 100;
+                    otaError = "";
                     otaVersion = remoteRun > 0 ? ("v1." + remoteRun + ".0") : "";
                     emitCurrentState();
                     return;
                 }
 
                 otaStatus = "downloading";
+                otaProgress = 5;
+                otaError = "";
                 otaVersion = "v1." + remoteRun + ".0";
                 emitCurrentState();
 
@@ -315,17 +641,20 @@ public class SkpVpnBridge {
 
                 HttpURLConnection zipConn = null;
                 try {
-                    URL zUrl = new URL(OTA_BUNDLE_URL + "?t=" + System.currentTimeMillis());
-                    zipConn = (HttpURLConnection) zUrl.openConnection();
-                    zipConn.setConnectTimeout(10000);
-                    zipConn.setReadTimeout(15000);
-                    zipConn.setUseCaches(false);
-
+                    zipConn = openConnectionFollowRedirects(bundleTargetUrl, 5, 10000, 20000);
                     if (zipConn.getResponseCode() != 200) {
-                        otaStatus = "idle";
+                        otaStatus = forceNow ? "error" : "idle";
+                        if (forceNow) {
+                            otaError = "Could not download instant bundle (HTTP " + zipConn.getResponseCode() + ").";
+                        }
                         emitCurrentState();
                         return;
                     }
+
+                    long totalLen = parseContentLength(zipConn);
+                    long expected = totalLen > 0 ? totalLen : 650_000L;
+                    long downloaded = 0L;
+                    long lastEmit = 0L;
 
                     try (InputStream is = new BufferedInputStream(zipConn.getInputStream());
                          FileOutputStream fos = new FileOutputStream(tempZip)) {
@@ -333,6 +662,13 @@ public class SkpVpnBridge {
                         int read;
                         while ((read = is.read(buf)) != -1) {
                             fos.write(buf, 0, read);
+                            downloaded += read;
+                            long tNow = System.currentTimeMillis();
+                            if (tNow - lastEmit >= 120L) {
+                                lastEmit = tNow;
+                                otaProgress = (int) Math.min(92L, Math.max(5L, (downloaded * 90L) / expected));
+                                emitCurrentState();
+                            }
                         }
                         fos.getFD().sync();
                     }
@@ -352,6 +688,9 @@ public class SkpVpnBridge {
                 // noinspection ResultOfMethodCallIgnored
                 targetDir.mkdirs();
 
+                otaProgress = 96;
+                emitCurrentState();
+
                 extractZipSafely(tempZip, targetDir);
                 // noinspection ResultOfMethodCallIgnored
                 tempZip.delete();
@@ -359,7 +698,10 @@ public class SkpVpnBridge {
                 File indexCheck = new File(targetDir, "index.html");
                 if (!indexCheck.exists() || indexCheck.length() == 0) {
                     deleteRecursive(targetDir);
-                    otaStatus = "idle";
+                    otaStatus = forceNow ? "error" : "idle";
+                    if (forceNow) {
+                        otaError = "Downloaded update package was invalid.";
+                    }
                     emitCurrentState();
                     return;
                 }
@@ -380,7 +722,9 @@ public class SkpVpnBridge {
                     .putString("ota_active_dir", targetDir.getAbsolutePath())
                     .apply();
 
+                otaProgress = 100;
                 otaStatus = "applied";
+                otaError = "";
                 emitCurrentState();
 
                 MainActivity activity = activityRef != null ? activityRef.get() : null;
@@ -388,8 +732,13 @@ public class SkpVpnBridge {
                     activity.applyOtaServerBasePath(targetDir.getAbsolutePath());
                 }
             } catch (Exception e) {
-                Log.w(TAG, "OTA update check skipped", e);
-                otaStatus = "idle";
+                Log.w(TAG, "OTA update check failed", e);
+                if (forceNow) {
+                    otaStatus = "error";
+                    otaError = e.getMessage() != null ? e.getMessage() : "Update check failed.";
+                } else {
+                    otaStatus = "idle";
+                }
                 emitCurrentState();
             } finally {
                 if (manifestConn != null) manifestConn.disconnect();
@@ -1108,6 +1457,8 @@ public class SkpVpnBridge {
             obj.put("upMbps", currentUpMbps);
             obj.put("otaStatus", otaStatus);
             obj.put("otaVersion", otaVersion);
+            obj.put("otaProgress", otaProgress);
+            obj.put("otaError", otaError);
             obj.put("installedBuild", getInstalledBuildNumber());
             long durSec = ("CONNECTED".equals(currentState) && connectedSinceMs > 0L)
                 ? Math.max(0L, (System.currentTimeMillis() - connectedSinceMs) / 1000L)

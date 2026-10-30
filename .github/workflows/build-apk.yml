@@ -27,9 +27,21 @@ jobs:
           set -euo pipefail
           rm -rf public/assets/aistudio || true
           npm install --legacy-peer-deps
+          VITE_NATIVE_ANDROID="true" \
           VITE_APP_BUILD_NUMBER="${GITHUB_RUN_NUMBER}" \
           VITE_APP_COMMIT_SHA="${GITHUB_SHA:0:7}" \
           npm run build
+
+          cat > dist/sw.js << 'EOF'
+          self.addEventListener('install', () => self.skipWaiting());
+          self.addEventListener('activate', (event) => {
+            event.waitUntil(
+              caches.keys()
+                .then((keys) => Promise.all(keys.map((k) => caches.delete(k))))
+                .then(() => self.registration.unregister())
+            );
+          });
+          EOF
 
           OTA_WORK="${RUNNER_TEMP}/ota_publish"
           rm -rf "$OTA_WORK"
@@ -139,9 +151,21 @@ jobs:
           set -euo pipefail
           rm -rf public/assets/aistudio || true
           npm install --legacy-peer-deps
+          VITE_NATIVE_ANDROID="true" \
           VITE_APP_BUILD_NUMBER="${GITHUB_RUN_NUMBER}" \
           VITE_APP_COMMIT_SHA="${GITHUB_SHA:0:7}" \
           npm run build
+
+          cat > dist/sw.js << 'EOF'
+          self.addEventListener('install', () => self.skipWaiting());
+          self.addEventListener('activate', (event) => {
+            event.waitUntil(
+              caches.keys()
+                .then((keys) => Promise.all(keys.map((k) => caches.delete(k))))
+                .then(() => self.registration.unregister())
+            );
+          });
+          EOF
 
           npm install --save-dev --legacy-peer-deps \
             @capacitor/core@6.2.0 \
@@ -178,18 +202,35 @@ jobs:
             appGradle = appGradle.replace(/versionCode\s+\d+/, "versionCode " + runNum);
             appGradle = appGradle.replace(/versionName\s+"[^"]*"/, `versionName "1.${runNum}.0"`);
             if (!appGradle.includes("com.wireguard.android:tunnel")) {
-              appGradle += `\n// SKP_NATIVE_WIREGUARD_VPN\nandroid {\n    compileOptions {\n        sourceCompatibility JavaVersion.VERSION_17\n        targetCompatibility JavaVersion.VERSION_17\n        coreLibraryDesugaringEnabled true\n    }\n    packagingOptions {\n        jniLibs {\n            useLegacyPackaging true\n        }\n    }\n}\n\ndependencies {\n    coreLibraryDesugaring "com.android.tools:desugar_jdk_libs:2.0.4"\n    implementation "com.wireguard.android:tunnel:1.0.20260102"\n}\n`;
+              appGradle += `\n// SKP_NATIVE_WIREGUARD_VPN\nandroid {\n    signingConfigs {\n        debug {\n            storeFile rootProject.file("../debug.keystore")\n            storePassword "android"\n            keyAlias "androiddebugkey"\n            keyPassword "android"\n        }\n    }\n    compileOptions {\n        sourceCompatibility JavaVersion.VERSION_17\n        targetCompatibility JavaVersion.VERSION_17\n        coreLibraryDesugaringEnabled true\n    }\n    packagingOptions {\n        jniLibs {\n            useLegacyPackaging true\n        }\n    }\n}\n\ndependencies {\n    coreLibraryDesugaring "com.android.tools:desugar_jdk_libs:2.0.4"\n    implementation "com.wireguard.android:tunnel:1.0.20260102"\n}\n`;
             }
             fs.writeFileSync(appGradlePath, appGradle);
           '
 
           printf "sdk.dir=%s\n" "${ANDROID_HOME}" > android/local.properties
 
-      - name: Create temporary debug keystore
+      - name: Prepare persistent APK signing keystore
         shell: bash
         run: |
           set -euo pipefail
-          if [ ! -f "./debug.keystore" ]; then
+          rm -f ./debug.keystore ./debug.p12
+          if [ -f "android-native/signing/debug-cert.pem" ] && [ -f "android-native/signing/debug-key.pem" ]; then
+            openssl pkcs12 -export \
+              -in android-native/signing/debug-cert.pem \
+              -inkey android-native/signing/debug-key.pem \
+              -out ./debug.p12 \
+              -name androiddebugkey \
+              -passout pass:android
+            "${JAVA_HOME}/bin/keytool" -importkeystore \
+              -srckeystore ./debug.p12 \
+              -srcstoretype PKCS12 \
+              -srcstorepass android \
+              -destkeystore ./debug.keystore \
+              -deststorepass android \
+              -destkeypass android \
+              -noprompt >/dev/null 2>&1
+            rm -f ./debug.p12
+          else
             "${JAVA_HOME}/bin/keytool" -genkeypair \
               -v \
               -keystore ./debug.keystore \

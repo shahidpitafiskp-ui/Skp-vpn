@@ -23,6 +23,7 @@ import {
   SplitTunnelApp,
   VpnProtocol,
 } from '../types/vpn';
+import { getNativeInstalledBuildNumber } from '../utils/nativeVpn';
 
 interface DrawerMenuProps {
   isOpen: boolean;
@@ -47,9 +48,12 @@ interface DrawerMenuProps {
   onToggleAutoReconnect: () => void;
   onSimulateDrop: () => void;
   onChangeLanguage: (lang: Language) => void;
+  otaStatus?: string;
+  otaProgress?: number;
   onOpenSpeedTest: () => void;
   onOpenBattery: () => void;
   onOpenUpdates: () => void;
+  onUpdateAppNow: () => void;
   onClose: () => void;
 }
 
@@ -76,12 +80,31 @@ export const DrawerMenu: React.FC<DrawerMenuProps> = ({
   onToggleAutoReconnect,
   onSimulateDrop,
   onChangeLanguage,
+  otaStatus = 'idle',
+  otaProgress = 0,
   onOpenSpeedTest,
   onOpenBattery,
   onOpenUpdates,
+  onUpdateAppNow,
   onClose,
 }) => {
   const [iconFailed, setIconFailed] = useState<boolean>(false);
+
+  const nativeBuild = getNativeInstalledBuildNumber();
+  const rawEnvBuild = import.meta.env.VITE_APP_BUILD_NUMBER as
+    | string
+    | undefined;
+  const activeVersionLabel = nativeBuild
+    ? `v1.${nativeBuild}.0`
+    : rawEnvBuild
+    ? `v1.${rawEnvBuild}.0`
+    : 'Live';
+
+  const isUpdatingNow =
+    otaStatus === 'checking' ||
+    otaStatus === 'downloading' ||
+    otaStatus === 'downloading_apk' ||
+    otaStatus === 'installing_apk';
 
   if (!isOpen) return null;
 
@@ -290,28 +313,56 @@ export const DrawerMenu: React.FC<DrawerMenuProps> = ({
               </span>
             </button>
 
-            <button
-              type="button"
-              onClick={() => {
-                onClose();
-                onOpenUpdates();
-              }}
-              className="w-full min-h-[48px] px-3.5 py-2.5 rounded-xl bg-slate-100 dark:bg-[#13291F] hover:bg-emerald-50 dark:hover:bg-emerald-500/15 text-slate-900 dark:text-slate-100 hover:text-[#0B5D32] dark:hover:text-emerald-300 flex items-center justify-between gap-2.5 text-sm font-semibold transition-colors cursor-pointer"
-            >
-              <span className="flex items-center gap-2.5">
-                <RefreshCw className="w-4 h-4 text-[#15803D] dark:text-emerald-400 shrink-0" />
+            <div className="p-2.5 rounded-xl bg-slate-100 dark:bg-[#13291F] border border-slate-200/70 dark:border-emerald-900/40 space-y-2">
+              <div className="flex items-center justify-between gap-2 px-1">
+                <button
+                  type="button"
+                  onClick={() => {
+                    onClose();
+                    onOpenUpdates();
+                  }}
+                  className="flex items-center gap-2 text-sm font-semibold text-slate-900 dark:text-slate-100 hover:text-[#0B5D32] dark:hover:text-emerald-300 transition-colors cursor-pointer min-w-0"
+                >
+                  <RefreshCw
+                    className={`w-4 h-4 text-[#15803D] dark:text-emerald-400 shrink-0 ${
+                      isUpdatingNow ? 'animate-spin' : ''
+                    }`}
+                  />
+                  <span
+                    className={`truncate ${
+                      language === 'ur' ? 'font-urdu' : ''
+                    }`}
+                  >
+                    {language === 'ur' ? 'ایپ اپڈیٹ کریں' : 'App Update'}
+                  </span>
+                </button>
+                <span className="text-xs font-mono-tabular text-slate-500 dark:text-slate-400 shrink-0">
+                  {isUpdatingNow && otaProgress > 0
+                    ? `${Math.round(otaProgress)}%`
+                    : activeVersionLabel}
+                </span>
+              </div>
+
+              <button
+                type="button"
+                onClick={() => {
+                  onClose();
+                  onUpdateAppNow();
+                }}
+                className="btn-3d-emerald w-full min-h-[44px] px-3.5 py-2 rounded-lg bg-[#15803D] hover:bg-[#116932] text-white text-xs font-semibold flex items-center justify-center gap-2 transition-all cursor-pointer whitespace-nowrap"
+              >
+                <RefreshCw
+                  className={`w-3.5 h-3.5 shrink-0 ${
+                    isUpdatingNow ? 'animate-spin' : ''
+                  }`}
+                />
                 <span className={language === 'ur' ? 'font-urdu' : ''}>
                   {language === 'ur'
-                    ? 'اپڈیٹس چیک کریں (Updates)'
-                    : 'Check for Updates'}
+                    ? 'ایپ ابھی اپڈیٹ کریں (Update Now)'
+                    : 'Update App Now'}
                 </span>
-              </span>
-              <span className="text-xs font-mono-tabular text-[#15803D] dark:text-emerald-400">
-                {import.meta.env.VITE_APP_BUILD_NUMBER
-                  ? `v1.${import.meta.env.VITE_APP_BUILD_NUMBER}.0`
-                  : 'Latest'}
-              </span>
-            </button>
+              </button>
+            </div>
 
             <button
               type="button"

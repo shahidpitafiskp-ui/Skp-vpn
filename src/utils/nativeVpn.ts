@@ -15,6 +15,8 @@ interface SkpNativeVpnInterface {
   openExternalUrl?: (url: string) => void;
   getInstalledBuildNumber?: () => number;
   triggerOtaUpdateCheck?: () => void;
+  downloadAndInstallApk?: (apkUrl: string) => void;
+  installDownloadedApkIfReady?: () => void;
 }
 
 declare global {
@@ -84,6 +86,69 @@ export function triggerNativeOtaUpdateCheck(): boolean {
   } catch {
     return false;
   }
+}
+
+export function hasNativeInAppApkInstaller(): boolean {
+  return Boolean(
+    isNativeAndroidVpn() &&
+      typeof window.SkpNativeVpn?.downloadAndInstallApk === 'function'
+  );
+}
+
+export function nativeDownloadAndInstallApk(apkUrl: string): boolean {
+  if (
+    !isNativeAndroidVpn() ||
+    typeof window.SkpNativeVpn?.downloadAndInstallApk !== 'function'
+  ) {
+    return false;
+  }
+  try {
+    window.SkpNativeVpn.downloadAndInstallApk(apkUrl);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+export function nativeInstallDownloadedApkIfReady(): boolean {
+  if (
+    !isNativeAndroidVpn() ||
+    typeof window.SkpNativeVpn?.installDownloadedApkIfReady !== 'function'
+  ) {
+    return false;
+  }
+  try {
+    window.SkpNativeVpn.installDownloadedApkIfReady();
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+export async function applyWebInstantUpdate(): Promise<void> {
+  if (typeof window === 'undefined') return;
+  try {
+    if ('serviceWorker' in navigator) {
+      const registrations = await navigator.serviceWorker.getRegistrations();
+      await Promise.all(
+        registrations.map(async (reg) => {
+          try {
+            await reg.update();
+            await reg.unregister();
+          } catch {
+            // Ignore SW errors
+          }
+        })
+      );
+    }
+    if ('caches' in window) {
+      const keys = await window.caches.keys();
+      await Promise.all(keys.map((key) => window.caches.delete(key)));
+    }
+  } catch {
+    // Ignore cache cleanup errors
+  }
+  window.location.reload();
 }
 
 export function nativeConnectVpn(
