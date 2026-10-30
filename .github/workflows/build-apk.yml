@@ -45,8 +45,34 @@ jobs:
             exit 1
           fi
 
-      - name: Set up Android SDK
-        uses: android-actions/setup-android@v3
+      - name: Configure Android SDK
+        shell: bash
+        run: |
+          set -euo pipefail
+          SDK_DIR="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-/usr/local/lib/android/sdk}}"
+
+          if [ ! -d "$SDK_DIR" ]; then
+            echo "Preinstalled Android SDK not found; installing command-line tools..."
+            SDK_DIR="${RUNNER_TEMP}/android-sdk"
+            mkdir -p "${SDK_DIR}/cmdline-tools"
+            curl -fsSL https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip -o "${RUNNER_TEMP}/cmdline-tools.zip"
+            unzip -q "${RUNNER_TEMP}/cmdline-tools.zip" -d "${SDK_DIR}/cmdline-tools"
+            mv "${SDK_DIR}/cmdline-tools/cmdline-tools" "${SDK_DIR}/cmdline-tools/latest"
+          fi
+
+          sudo chmod -R a+rwX "$SDK_DIR" || true
+
+          echo "ANDROID_HOME=${SDK_DIR}" >> "$GITHUB_ENV"
+          echo "ANDROID_SDK_ROOT=${SDK_DIR}" >> "$GITHUB_ENV"
+          echo "Configured Android SDK at: ${SDK_DIR}"
+
+          SDKMANAGER=$(find "$SDK_DIR" -name sdkmanager -type f | head -n 1 || true)
+          if [ -n "$SDKMANAGER" ]; then
+            yes | "$SDKMANAGER" --sdk_root="$SDK_DIR" --licenses >/dev/null 2>&1 || true
+          else
+            mkdir -p "${SDK_DIR}/licenses"
+            printf "\n24333f8a63b6825ea9c5514f83c2829b004d1fee" > "${SDK_DIR}/licenses/android-sdk-license"
+          fi
 
       - name: Set up Node.js 22
         uses: actions/setup-node@v4
@@ -57,32 +83,21 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          rm -rf public/assets/aistudio || true
           npm install --legacy-peer-deps
           npm run build
 
-          npm install --no-save --legacy-peer-deps \
+          npm install --save-dev --legacy-peer-deps \
             @capacitor/core@6.2.0 \
             @capacitor/cli@6.2.0 \
-            @capacitor/android@6.2.0 \
-            @capacitor/assets@3.0.5
+            @capacitor/android@6.2.0
 
           if [ ! -d "android" ]; then
             npx cap add android
           fi
 
           npx cap sync android
-
-          if [ -f "public/pwa-512x512.png" ]; then
-            mkdir -p assets
-            cp public/pwa-512x512.png assets/icon-only.png
-            cp public/pwa-512x512.png assets/icon-foreground.png
-            cp public/pwa-512x512.png assets/splash.png
-            npx capacitor-assets generate --android \
-              --iconBackgroundColor '#0B5D32' \
-              --iconBackgroundColorDark '#0B5D32' \
-              --splashBackgroundColor '#147A42' \
-              --splashBackgroundColorDark '#0B5D32' || true
-          fi
+          printf "sdk.dir=%s\n" "${ANDROID_HOME}" > android/local.properties
 
       - name: Create temporary debug keystore
         shell: bash
@@ -204,17 +219,18 @@ jobs:
           RELEASE_TITLE="Debug APK Build #${GITHUB_RUN_NUMBER}"
 
           RELEASE_NOTES=$(cat <<EOF
-          Automatically generated debug APK for **SKP VPN** built by GitHub Actions.
+          Automatically generated debug APK for SKP VPN built by GitHub Actions.
 
-          - **Workflow Run Number:** ${GITHUB_RUN_NUMBER}
-          - **Workflow Run Attempt:** ${GITHUB_RUN_ATTEMPT}
-          - **Source Commit SHA:** ${GITHUB_SHA}
-          - **Purpose:** Intended for testing and direct installation only (not a Play Store production release).
-          - **Signing:** Signed with a temporary debug keystore.
+          - Workflow Run Number: ${GITHUB_RUN_NUMBER}
+          - Workflow Run Attempt: ${GITHUB_RUN_ATTEMPT}
+          - Source Commit SHA: ${GITHUB_SHA}
+          - Purpose: Intended for testing and direct installation only (not a Play Store production release).
+          - Signing: Signed with a temporary debug keystore.
           EOF
           )
 
           gh release create "$RELEASE_TAG" "$APK_PATH" \
+            --repo "${GITHUB_REPOSITORY}" \
             --title "$RELEASE_TITLE" \
             --notes "$RELEASE_NOTES" \
             --target "$GITHUB_SHA" \
@@ -233,7 +249,7 @@ jobs:
           DIRECT_URL="https://github.com/${GITHUB_REPOSITORY}/releases/latest/download/app-debug.apk"
 
           if [ "$RELEASE_OUTCOME" = "success" ]; then
-            RELEASE_PAGE_URL=$(gh release view "$RELEASE_TAG" --json url -q .url)
+            RELEASE_PAGE_URL=$(gh release view "$RELEASE_TAG" --repo "${GITHUB_REPOSITORY}" --json url -q .url)
             echo "Release Tag: $RELEASE_TAG"
             echo "Release Title: $RELEASE_TITLE"
             echo "Release Page: $RELEASE_PAGE_URL"
