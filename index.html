@@ -11,6 +11,7 @@
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
     <meta name="apple-mobile-web-app-title" content="SKP VPN" />
     <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
+    <link rel="icon" type="image/png" sizes="64x64" href="/favicon.png" />
     <link rel="icon" type="image/svg+xml" href="/icon.svg" />
     <meta property="og:title" content="SKP VPN" />
     <meta property="og:description" content="One-tap VPN client featuring automatic optimal server selection, global proxy locations, live throughput telemetry, split tunneling, and built-in speed diagnostics." />
@@ -19,8 +20,15 @@
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600&family=Noto+Nastaliq+Urdu:wght@400;600&family=Plus+Jakarta+Sans:wght@400;500;600;700&display=swap" rel="stylesheet" />
+    <script>
+      try {
+        if (localStorage.getItem('skp_vpn_dark_mode') === 'true') {
+          document.documentElement.classList.add('dark');
+        }
+      } catch (e) {}
+    </script>
   </head>
-  <body class="bg-[#147A42] text-slate-900 antialiased selection:bg-[#15803D]/20 selection:text-[#0B5D32]">
+  <body class="bg-[#147A42] dark:bg-[#061A11] text-slate-900 dark:text-slate-100 antialiased selection:bg-[#15803D]/20 selection:text-[#0B5D32] dark:selection:bg-emerald-500/30 dark:selection:text-emerald-200 transition-colors duration-200">
     <div id="root"></div>
     <script type="module" src="/src/main.tsx"></script>
   </body>

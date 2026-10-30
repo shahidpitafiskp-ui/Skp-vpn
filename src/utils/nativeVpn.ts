@@ -13,6 +13,8 @@ interface SkpNativeVpnInterface {
   isIgnoringBatteryOptimizations: () => boolean;
   openBatterySettings: () => void;
   openExternalUrl?: (url: string) => void;
+  getInstalledBuildNumber?: () => number;
+  triggerOtaUpdateCheck?: () => void;
 }
 
 declare global {
@@ -57,6 +59,30 @@ export function getNativeVpnStatus(): NativeVpnEventPayload | null {
     return JSON.parse(raw) as NativeVpnEventPayload;
   } catch {
     return null;
+  }
+}
+
+export function getNativeInstalledBuildNumber(): number | null {
+  if (!isNativeAndroidVpn() || !window.SkpNativeVpn?.getInstalledBuildNumber) {
+    return null;
+  }
+  try {
+    const num = window.SkpNativeVpn.getInstalledBuildNumber();
+    return typeof num === 'number' && num > 0 ? num : null;
+  } catch {
+    return null;
+  }
+}
+
+export function triggerNativeOtaUpdateCheck(): boolean {
+  if (!isNativeAndroidVpn() || !window.SkpNativeVpn?.triggerOtaUpdateCheck) {
+    return false;
+  }
+  try {
+    window.SkpNativeVpn.triggerOtaUpdateCheck();
+    return true;
+  } catch {
+    return false;
   }
 }
 

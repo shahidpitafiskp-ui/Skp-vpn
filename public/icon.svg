@@ -1,7 +1,58 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
-  <rect width="512" height="512" rx="112" fill="#0B5D32"/>
-  <circle cx="256" cy="256" r="186" fill="#147A42"/>
-  <path d="M256 108L376 156V248C376 326 324 394 256 416C188 394 136 326 136 248V156L256 108Z" fill="#FFFFFF"/>
-  <path d="M256 144L344 179V246C344 305 306 357 256 376C206 357 168 305 168 246V179L256 144Z" fill="#15803D"/>
-  <path d="M226 254L248 276L294 228" fill="none" stroke="#FFFFFF" stroke-width="24" stroke-linecap="round" stroke-linejoin="round"/>
+  <defs>
+    <linearGradient id="bgGrad" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#FFFFFF" />
+      <stop offset="100%" stop-color="#EFF8FC" />
+    </linearGradient>
+    <linearGradient id="shieldGrad" x1="0" y1="0" x2="1" y2="0.85">
+      <stop offset="0%" stop-color="#0A4CA1" />
+      <stop offset="52%" stop-color="#117ED0" />
+      <stop offset="100%" stop-color="#1EC8E2" />
+    </linearGradient>
+  </defs>
+  <rect width="512" height="512" rx="108" fill="url(#bgGrad)" />
+  <path
+    d="M256 68 C210 98 166 108 144 111 L144 188 C144 268 192 318 256 350 C320 318 368 268 368 188 L368 111 C346 108 302 98 256 68 Z"
+    fill="none"
+    stroke="url(#shieldGrad)"
+    stroke-width="24"
+    stroke-linejoin="round"
+  />
+  <path
+    d="M198 256 C168 256 164 234 188 214 C214 192 252 178 286 168 L276 150 L322 162 L288 196 L289 178 C252 188 214 202 198 220 C188 231 198 238 214 240 C236 242 246 258 242 276 C237 294 214 300 186 294"
+    fill="none"
+    stroke="url(#shieldGrad)"
+    stroke-width="18"
+    stroke-linecap="round"
+    stroke-linejoin="round"
+  />
+  <text
+    x="286"
+    y="272"
+    text-anchor="middle"
+    font-family="Plus Jakarta Sans, Arial, sans-serif"
+    font-weight="800"
+    font-size="82"
+    fill="url(#shieldGrad)"
+  >KP</text>
+  <text
+    x="256"
+    y="416"
+    text-anchor="middle"
+    font-family="Plus Jakarta Sans, Arial, sans-serif"
+    font-weight="800"
+    font-size="78"
+    letter-spacing="2"
+    fill="#0B4C9C"
+  >SKP</text>
+  <text
+    x="256"
+    y="464"
+    text-anchor="middle"
+    font-family="Plus Jakarta Sans, Arial, sans-serif"
+    font-weight="700"
+    font-size="38"
+    letter-spacing="12"
+    fill="#16B7D3"
+  >VPN</text>
 </svg>

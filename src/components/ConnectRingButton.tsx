@@ -7,6 +7,7 @@ interface ConnectRingButtonProps {
   connectLabel: string;
   disconnectLabel: string;
   cancelLabel: string;
+  darkMode?: boolean;
 }
 
 export const ConnectRingButton: React.FC<ConnectRingButtonProps> = ({
@@ -15,6 +16,7 @@ export const ConnectRingButton: React.FC<ConnectRingButtonProps> = ({
   connectLabel,
   disconnectLabel,
   cancelLabel,
+  darkMode = false,
 }) => {
   const isConnected = status === ConnectionStatus.Connected;
   const isReconnecting = status === ConnectionStatus.Reconnecting;
@@ -30,14 +32,26 @@ export const ConnectRingButton: React.FC<ConnectRingButtonProps> = ({
     : connectLabel;
 
   const ringBaseStroke = isConnected
-    ? '#16A34A'
+    ? darkMode
+      ? '#22C55E'
+      : '#16A34A'
     : isReconnecting
-    ? '#FAD7B0'
+    ? darkMode
+      ? '#7C4A15'
+      : '#FAD7B0'
     : isTransitioning
-    ? '#BBF7D0'
+    ? darkMode
+      ? '#14532D'
+      : '#BBF7D0'
+    : darkMode
+    ? '#1B4D32'
     : '#86EFAC';
 
-  const sweepStroke = isReconnecting ? '#F48A24' : '#15803D';
+  const sweepStroke = isReconnecting
+    ? '#F48A24'
+    : darkMode
+    ? '#34D399'
+    : '#15803D';
 
   return (
     <div className="relative flex items-center justify-center my-2 select-none">
@@ -56,7 +70,7 @@ export const ConnectRingButton: React.FC<ConnectRingButtonProps> = ({
             cy="110"
             r="105"
             fill="none"
-            stroke="#D6E6DC"
+            stroke={darkMode ? '#1A3829' : '#D6E6DC'}
             strokeWidth="2.5"
           />
 
@@ -86,16 +100,16 @@ export const ConnectRingButton: React.FC<ConnectRingButtonProps> = ({
           )}
         </svg>
 
-        <span className="relative z-10 w-[156px] h-[156px] rounded-full bg-white shadow-xs flex flex-col items-center justify-center px-3 transition-transform duration-150 group-hover:scale-[1.01]">
+        <span className="relative z-10 w-[156px] h-[156px] rounded-full bg-white dark:bg-[#132A1F] shadow-xs flex flex-col items-center justify-center px-3 transition-all duration-150 group-hover:scale-[1.01]">
           <span
             className={`text-[18px] font-semibold tracking-wide whitespace-nowrap ${
               isConnected
-                ? 'text-[#15803D]'
+                ? 'text-[#15803D] dark:text-emerald-400'
                 : isReconnecting
-                ? 'text-[#D9720D]'
+                ? 'text-[#D9720D] dark:text-amber-400'
                 : isTransitioning
-                ? 'text-[#15803D]'
-                : 'text-[#166534]'
+                ? 'text-[#15803D] dark:text-emerald-400'
+                : 'text-[#166534] dark:text-emerald-300'
             }`}
           >
             {buttonText}

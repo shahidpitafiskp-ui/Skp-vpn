@@ -10,6 +10,60 @@ permissions:
   contents: write
 
 jobs:
+  publish-ota:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Build and Publish Instant OTA Bundle
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf public/assets/aistudio || true
+          npm install --legacy-peer-deps
+          VITE_APP_BUILD_NUMBER="${GITHUB_RUN_NUMBER}" \
+          VITE_APP_COMMIT_SHA="${GITHUB_SHA:0:7}" \
+          npm run build
+
+          OTA_WORK="${RUNNER_TEMP}/ota_publish"
+          rm -rf "$OTA_WORK"
+          mkdir -p "$OTA_WORK"
+
+          (
+            cd dist
+            zip -qr "${OTA_WORK}/ota-bundle.zip" .
+          )
+
+          node -e '
+            const fs = require("fs");
+            const manifest = {
+              runNumber: parseInt(process.env.GITHUB_RUN_NUMBER || "1", 10) || 1,
+              commit: (process.env.GITHUB_SHA || "").slice(0, 7),
+              fullCommit: process.env.GITHUB_SHA || "",
+              updatedAt: new Date().toISOString()
+            };
+            fs.writeFileSync(process.argv[1], JSON.stringify(manifest, null, 2));
+          ' "${OTA_WORK}/ota-manifest.json"
+
+          (
+            cd "$OTA_WORK"
+            git init -q
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git checkout -q -b ota-live
+            git add ota-manifest.json ota-bundle.zip
+            git commit -q -m "OTA update build #${GITHUB_RUN_NUMBER} (${GITHUB_SHA:0:7})"
+            git push -f "https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" HEAD:refs/heads/ota-live
+          )
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+
   build-apk:
     runs-on: ubuntu-latest
 
@@ -100,14 +154,16 @@ jobs:
 
           npx cap sync android
 
-          # Inject real Android WireGuard VpnService bridge and manifest
+          # Inject real Android WireGuard VpnService bridge, manifest, and SKP VPN launcher icons
           cp android-native/AndroidManifest.xml android/app/src/main/AndroidManifest.xml
+          rm -f android/app/src/main/res/mipmap-*/ic_launcher*.webp android/app/src/main/res/mipmap-*/ic_launcher*.png || true
+          cp -r android-native/res/* android/app/src/main/res/
           find android/app/src/main/java -name "MainActivity.java" -delete || true
           mkdir -p android/app/src/main/java/com/skpvpn/android
           cp android-native/java/com/skpvpn/android/MainActivity.java android/app/src/main/java/com/skpvpn/android/MainActivity.java
           cp android-native/java/com/skpvpn/android/SkpVpnBridge.java android/app/src/main/java/com/skpvpn/android/SkpVpnBridge.java
 
-          # Ensure minSdkVersion >= 24, dynamic versionCode/versionName, emerald icon background, & WireGuard AAR
+          # Ensure minSdkVersion >= 24, dynamic versionCode/versionName, & WireGuard AAR
           node -e '
             const fs = require("fs");
             const runNum = parseInt(process.env.GITHUB_RUN_NUMBER || "1", 10) || 1;
@@ -116,13 +172,6 @@ jobs:
             let vars = fs.readFileSync(varsPath, "utf8");
             vars = vars.replace(/minSdkVersion\s*=\s*\d+/, "minSdkVersion = 24");
             fs.writeFileSync(varsPath, vars);
-
-            const bgXmlPath = "android/app/src/main/res/values/ic_launcher_background.xml";
-            if (fs.existsSync(bgXmlPath)) {
-              let bg = fs.readFileSync(bgXmlPath, "utf8");
-              bg = bg.replace(/#[0-9A-Fa-f]{6}/, "#147A42");
-              fs.writeFileSync(bgXmlPath, bg);
-            }
 
             const appGradlePath = "android/app/build.gradle";
             let appGradle = fs.readFileSync(appGradlePath, "utf8");

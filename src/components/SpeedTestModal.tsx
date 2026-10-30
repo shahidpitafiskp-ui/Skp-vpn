@@ -10,7 +10,10 @@ import {
 } from 'lucide-react';
 import { Language, ServerLocation, SpeedTestMetrics } from '../types/vpn';
 
-async function measureRealNetworkRtt(): Promise<{ rttMs: number; jitterMs: number }> {
+async function measureRealNetworkRtt(): Promise<{
+  rttMs: number;
+  jitterMs: number;
+}> {
   const samples: number[] = [];
   for (let i = 0; i < 3; i++) {
     const start = performance.now();
@@ -26,7 +29,9 @@ async function measureRealNetworkRtt(): Promise<{ rttMs: number; jitterMs: numbe
     }
   }
   const avg = Math.round(samples.reduce((a, b) => a + b, 0) / samples.length);
-  const diffs = samples.slice(1).map((val, idx) => Math.abs(val - samples[idx]));
+  const diffs = samples
+    .slice(1)
+    .map((val, idx) => Math.abs(val - samples[idx]));
   const jitter =
     diffs.length > 0
       ? Math.max(1, Math.round(diffs.reduce((a, b) => a + b, 0) / diffs.length))
@@ -51,7 +56,9 @@ function useFastSpeedCheck(
   onComplete: (metrics: SpeedTestMetrics) => void
 ): UseFastSpeedCheckResult {
   const [running, setRunning] = useState(false);
-  const [phase, setPhase] = useState<'idle' | 'ping' | 'download' | 'upload' | 'done'>('idle');
+  const [phase, setPhase] = useState<
+    'idle' | 'ping' | 'download' | 'upload' | 'done'
+  >('idle');
   const [progress, setProgress] = useState(0);
   const [liveDown, setLiveDown] = useState(0);
   const [liveUp, setLiveUp] = useState(0);
@@ -80,9 +87,11 @@ function useFastSpeedCheck(
     setLiveDown(0);
     setLiveUp(0);
 
-    // Measure actual browser RTT + server tunnel latency
     const { rttMs, jitterMs } = await measureRealNetworkRtt();
-    const effectivePing = Math.min(180, Math.round((rttMs + server.basePingMs) / 2));
+    const effectivePing = Math.min(
+      180,
+      Math.round((rttMs + server.basePingMs) / 2)
+    );
     const effectiveLoadedPing = effectivePing + 11 + (server.loadPercent % 9);
 
     setUnloadedPing(effectivePing);
@@ -90,9 +99,10 @@ function useFastSpeedCheck(
     setJitter(jitterMs);
     setPhase('download');
 
-    // Derive realistic high-speed throughput anchored to server load & measured RTT
     const loadFactor = (100 - server.loadPercent) / 100;
-    const targetDown = Number((62 + loadFactor * 58 + (effectivePing < 40 ? 18 : 4)).toFixed(1));
+    const targetDown = Number(
+      (62 + loadFactor * 58 + (effectivePing < 40 ? 18 : 4)).toFixed(1)
+    );
     const targetUp = Number((targetDown * 0.44).toFixed(1));
 
     let currentStep = 10;
@@ -105,14 +115,18 @@ function useFastSpeedCheck(
         const ratio = (currentStep - 10) / 52;
         const eased = 1 - Math.pow(1 - ratio, 2.2);
         const jitterDelta = Math.random() * 5.2 - 2.6;
-        setLiveDown(Math.max(1.2, Number((targetDown * eased + jitterDelta).toFixed(1))));
+        setLiveDown(
+          Math.max(1.2, Number((targetDown * eased + jitterDelta).toFixed(1)))
+        );
       } else if (currentStep < 100) {
         setPhase('upload');
         setLiveDown(targetDown);
         const ratio = (currentStep - 62) / 38;
         const eased = 1 - Math.pow(1 - ratio, 2);
         const jitterDelta = Math.random() * 2.6 - 1.3;
-        setLiveUp(Math.max(0.8, Number((targetUp * eased + jitterDelta).toFixed(1))));
+        setLiveUp(
+          Math.max(0.8, Number((targetUp * eased + jitterDelta).toFixed(1)))
+        );
       } else {
         clearTimer();
         setRunning(false);
@@ -181,16 +195,18 @@ export const FastSpeedCheckCard: React.FC<FastSpeedCheckCardProps> = ({
     phase === 'idle' && lastMetrics ? lastMetrics.pingMs : unloadedPing;
 
   return (
-    <div className="bg-white rounded-md shadow-xs border border-slate-200/70 p-4 space-y-3.5">
+    <div className="bg-white dark:bg-[#0F2018] rounded-xl shadow-xs border border-slate-200/70 dark:border-emerald-900/40 p-4 space-y-3.5 transition-colors duration-200">
       <div className="flex items-center justify-between gap-2">
         <div className="flex items-center gap-2 min-w-0">
-          <Gauge className="w-4 h-4 text-[#15803D] shrink-0" />
+          <Gauge className="w-4 h-4 text-[#15803D] dark:text-emerald-400 shrink-0" />
           <span
-            className={`text-sm font-bold text-slate-900 truncate ${
+            className={`text-sm font-bold text-slate-900 dark:text-slate-100 truncate ${
               language === 'ur' ? 'font-urdu' : ''
             }`}
           >
-            {language === 'ur' ? 'فاسٹ انٹرنیٹ سپیڈ چیک' : 'Fast Internet Speed Check'}
+            {language === 'ur'
+              ? 'فاسٹ انٹرنیٹ سپیڈ چیک'
+              : 'Fast Internet Speed Check'}
           </span>
         </div>
 
@@ -198,7 +214,7 @@ export const FastSpeedCheckCard: React.FC<FastSpeedCheckCardProps> = ({
           type="button"
           onClick={onOpenFullModal}
           aria-label="Open full speed check screen"
-          className="min-w-[36px] min-h-[36px] px-2 rounded-lg text-xs font-medium text-slate-500 hover:text-slate-900 hover:bg-slate-100 flex items-center gap-1 transition-colors cursor-pointer shrink-0"
+          className="min-w-[36px] min-h-[36px] px-2 rounded-lg text-xs font-medium text-slate-500 dark:text-slate-400 hover:text-slate-900 dark:hover:text-slate-100 hover:bg-slate-100 dark:hover:bg-[#152D21] flex items-center gap-1 transition-colors cursor-pointer shrink-0"
         >
           <Maximize2 className="w-3.5 h-3.5" />
           <span>{language === 'ur' ? 'تفصیل' : 'Details'}</span>
@@ -209,13 +225,17 @@ export const FastSpeedCheckCard: React.FC<FastSpeedCheckCardProps> = ({
       <div className="flex items-center justify-between gap-4 py-1">
         <div>
           <div className="flex items-baseline gap-1.5">
-            <span className="text-4xl font-bold font-mono-tabular tracking-tight text-slate-900">
+            <span className="text-4xl font-bold font-mono-tabular tracking-tight text-slate-900 dark:text-white">
               {displayedDown > 0 ? displayedDown.toFixed(1) : '0.0'}
             </span>
-            <span className="text-sm font-semibold text-slate-500">Mbps</span>
+            <span className="text-sm font-semibold text-slate-500 dark:text-slate-400">
+              Mbps
+            </span>
           </div>
-          <div className="mt-1 flex items-center gap-2 text-xs text-slate-500 font-mono-tabular">
-            <span>↑ {displayedUp > 0 ? displayedUp.toFixed(1) : '--'} Mbps</span>
+          <div className="mt-1 flex items-center gap-2 text-xs text-slate-500 dark:text-slate-400 font-mono-tabular">
+            <span>
+              ↑ {displayedUp > 0 ? displayedUp.toFixed(1) : '--'} Mbps
+            </span>
             <span aria-hidden="true">·</span>
             <span>{displayedPing} ms ping</span>
           </div>
@@ -227,7 +247,9 @@ export const FastSpeedCheckCard: React.FC<FastSpeedCheckCardProps> = ({
           onClick={startCheck}
           className="min-h-[44px] px-4 py-2.5 rounded-xl bg-[#15803D] disabled:opacity-60 hover:bg-[#116932] active:scale-[0.98] text-white text-xs font-semibold flex items-center gap-1.5 transition-all whitespace-nowrap shrink-0 cursor-pointer"
         >
-          <RotateCw className={`w-3.5 h-3.5 ${running ? 'animate-spin' : ''}`} />
+          <RotateCw
+            className={`w-3.5 h-3.5 ${running ? 'animate-spin' : ''}`}
+          />
           <span className={language === 'ur' ? 'font-urdu' : ''}>
             {running
               ? `${progress}%`
@@ -240,9 +262,9 @@ export const FastSpeedCheckCard: React.FC<FastSpeedCheckCardProps> = ({
 
       {/* Progress Bar when active */}
       {running && (
-        <div className="h-1.5 w-full rounded-full bg-slate-100 overflow-hidden">
+        <div className="h-1.5 w-full rounded-full bg-slate-100 dark:bg-slate-800 overflow-hidden">
           <div
-            className="h-full bg-[#15803D] rounded-full transition-transform duration-100 origin-left"
+            className="h-full bg-[#15803D] dark:bg-emerald-500 rounded-full transition-transform duration-100 origin-left"
             style={{ transform: `scaleX(${progress / 100})` }}
           />
         </div>
@@ -286,9 +308,8 @@ export const SpeedTestModal: React.FC<SpeedTestModalProps> = ({
 
   if (!isOpen) return null;
 
-  // Semicircular gauge fill calculation (max 150 Mbps visual scale)
   const gaugeRatio = Math.min(1, Math.max(0, liveDown / 150));
-  const arcCircumference = 251.2; // pi * r (r = 80)
+  const arcCircumference = 251.2;
   const strokeDashoffset = arcCircumference * (1 - gaugeRatio);
 
   const qualitySummary =
@@ -306,29 +327,31 @@ export const SpeedTestModal: React.FC<SpeedTestModalProps> = ({
 
   return (
     <div
-      className="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-slate-900/50 backdrop-blur-xs p-0 sm:p-4"
+      className="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-slate-950/60 backdrop-blur-xs p-0 sm:p-4"
       onClick={onClose}
     >
       <div
-        className="w-full sm:max-w-md bg-white rounded-t-3xl sm:rounded-2xl shadow-xl overflow-hidden"
+        className="w-full sm:max-w-md bg-white dark:bg-[#0D1E16] text-slate-900 dark:text-slate-100 rounded-t-3xl sm:rounded-2xl shadow-xl border border-transparent dark:border-emerald-900/40 overflow-hidden transition-colors duration-200"
         onClick={(e) => e.stopPropagation()}
       >
-        <div className="flex items-center justify-between px-6 py-4 border-b border-slate-100">
+        <div className="flex items-center justify-between px-6 py-4 border-b border-slate-100 dark:border-emerald-900/40">
           <div className="flex items-center gap-2.5">
-            <Gauge className="w-5 h-5 text-[#15803D]" />
+            <Gauge className="w-5 h-5 text-[#15803D] dark:text-emerald-400" />
             <h2
-              className={`text-base font-bold text-slate-900 ${
+              className={`text-base font-bold text-slate-900 dark:text-slate-100 ${
                 language === 'ur' ? 'font-urdu' : ''
               }`}
             >
-              {language === 'ur' ? 'فاسٹ انٹرنیٹ سپیڈ چیک' : 'Fast Internet Speed Check'}
+              {language === 'ur'
+                ? 'فاسٹ انٹرنیٹ سپیڈ چیک'
+                : 'Fast Internet Speed Check'}
             </h2>
           </div>
           <button
             type="button"
             onClick={onClose}
             aria-label="Close speed check"
-            className="min-w-[40px] min-h-[40px] -mr-2 rounded-full flex items-center justify-center text-slate-500 hover:bg-slate-100 transition-colors cursor-pointer"
+            className="min-w-[40px] min-h-[40px] -mr-2 rounded-full flex items-center justify-center text-slate-500 dark:text-slate-400 hover:bg-slate-100 dark:hover:bg-[#13291F] transition-colors cursor-pointer"
           >
             <X className="w-5 h-5" />
           </button>
@@ -336,7 +359,7 @@ export const SpeedTestModal: React.FC<SpeedTestModalProps> = ({
 
         <div className="p-6 space-y-5">
           {/* Active Node Info */}
-          <div className="flex items-center justify-between text-xs text-slate-500">
+          <div className="flex items-center justify-between text-xs text-slate-500 dark:text-slate-400">
             <span>
               {language === 'ur' ? server.nameUr : server.nameEn} ·{' '}
               {language === 'ur' ? server.cityUr : server.cityEn}
@@ -347,36 +370,38 @@ export const SpeedTestModal: React.FC<SpeedTestModalProps> = ({
           {/* Fast.com-Style Speedometer Gauge + Giant Mbps Readout */}
           <div className="flex flex-col items-center pt-2 pb-1">
             <div className="relative w-52 h-28 flex items-end justify-center">
-              <svg viewBox="0 0 200 110" className="w-full h-full overflow-visible">
+              <svg
+                viewBox="0 0 200 110"
+                className="w-full h-full overflow-visible"
+              >
                 <path
                   d="M 20 95 A 80 80 0 0 1 180 95"
                   fill="none"
-                  stroke="#E2E8F0"
                   strokeWidth="14"
                   strokeLinecap="round"
+                  className="stroke-[#E2E8F0] dark:stroke-[#173325]"
                 />
                 <path
                   d="M 20 95 A 80 80 0 0 1 180 95"
                   fill="none"
-                  stroke="#15803D"
                   strokeWidth="14"
                   strokeLinecap="round"
                   strokeDasharray={arcCircumference}
                   strokeDashoffset={strokeDashoffset}
-                  className="transition-all duration-150"
+                  className="stroke-[#15803D] dark:stroke-emerald-400 transition-all duration-150"
                 />
               </svg>
               <div className="absolute bottom-0 flex flex-col items-center">
-                <span className="text-4xl font-bold font-mono-tabular tracking-tight text-slate-900">
+                <span className="text-4xl font-bold font-mono-tabular tracking-tight text-slate-900 dark:text-white">
                   {liveDown.toFixed(1)}
                 </span>
-                <span className="text-xs font-semibold text-slate-500">
+                <span className="text-xs font-semibold text-slate-500 dark:text-slate-400">
                   Mbps Download
                 </span>
               </div>
             </div>
 
-            <div className="mt-3 text-xs text-slate-500 text-center">
+            <div className="mt-3 text-xs text-slate-500 dark:text-slate-400 text-center">
               {running ? (
                 <span>
                   {phase === 'ping'
@@ -386,51 +411,59 @@ export const SpeedTestModal: React.FC<SpeedTestModalProps> = ({
                     : `Testing upload stream (${progress}%)...`}
                 </span>
               ) : (
-                <span className="text-emerald-700 font-medium">{qualitySummary}</span>
+                <span className="text-emerald-700 dark:text-emerald-400 font-medium">
+                  {qualitySummary}
+                </span>
               )}
             </div>
           </div>
 
-          {/* Detailed Metrics Grid (Unloaded/Loaded Latency, Upload, Jitter) */}
+          {/* Detailed Metrics Grid */}
           <div className="grid grid-cols-3 gap-3">
-            <div className="p-3.5 rounded-xl bg-slate-50 border border-slate-100">
-              <div className="flex items-center gap-1 text-xs text-slate-500 mb-1">
-                <Activity className="w-3.5 h-3.5 text-[#15803D]" />
+            <div className="p-3.5 rounded-xl bg-slate-50 dark:bg-[#13291F] border border-slate-100 dark:border-emerald-900/40">
+              <div className="flex items-center gap-1 text-xs text-slate-500 dark:text-slate-400 mb-1">
+                <Activity className="w-3.5 h-3.5 text-[#15803D] dark:text-emerald-400" />
                 <span>Latency</span>
               </div>
-              <div className="text-lg font-bold font-mono-tabular text-slate-900">
+              <div className="text-lg font-bold font-mono-tabular text-slate-900 dark:text-white">
                 {unloadedPing}
-                <span className="text-xs font-normal text-slate-500 ml-1">ms</span>
+                <span className="text-xs font-normal text-slate-500 dark:text-slate-400 ml-1">
+                  ms
+                </span>
               </div>
-              <div className="text-[11px] text-slate-400 font-mono-tabular mt-0.5">
+              <div className="text-[11px] text-slate-400 dark:text-slate-500 font-mono-tabular mt-0.5">
                 Loaded {loadedPing} ms
               </div>
             </div>
 
-            <div className="p-3.5 rounded-xl bg-slate-50 border border-slate-100">
-              <div className="flex items-center gap-1 text-xs text-slate-500 mb-1">
-                <ArrowUp className="w-3.5 h-3.5 text-sky-600" />
+            <div className="p-3.5 rounded-xl bg-slate-50 dark:bg-[#13291F] border border-slate-100 dark:border-emerald-900/40">
+              <div className="flex items-center gap-1 text-xs text-slate-500 dark:text-slate-400 mb-1">
+                <ArrowUp className="w-3.5 h-3.5 text-sky-600 dark:text-sky-400" />
                 <span>Upload</span>
               </div>
-              <div className="text-lg font-bold font-mono-tabular text-slate-900">
+              <div className="text-lg font-bold font-mono-tabular text-slate-900 dark:text-white">
                 {liveUp.toFixed(1)}
-                <span className="text-xs font-normal text-slate-500 ml-1">Mbps</span>
+                <span className="text-xs font-normal text-slate-500 dark:text-slate-400 ml-1">
+                  Mbps
+                </span>
               </div>
-              <div className="text-[11px] text-slate-400 font-mono-tabular mt-0.5">
+              <div className="text-[11px] text-slate-400 dark:text-slate-500 font-mono-tabular mt-0.5">
                 Jitter {jitter} ms
               </div>
             </div>
 
-            <div className="p-3.5 rounded-xl bg-slate-50 border border-slate-100">
-              <div className="flex items-center gap-1 text-xs text-slate-500 mb-1">
-                <ArrowDown className="w-3.5 h-3.5 text-emerald-600" />
+            <div className="p-3.5 rounded-xl bg-slate-50 dark:bg-[#13291F] border border-slate-100 dark:border-emerald-900/40">
+              <div className="flex items-center gap-1 text-xs text-slate-500 dark:text-slate-400 mb-1">
+                <ArrowDown className="w-3.5 h-3.5 text-emerald-600 dark:text-emerald-400" />
                 <span>Peak</span>
               </div>
-              <div className="text-lg font-bold font-mono-tabular text-slate-900">
+              <div className="text-lg font-bold font-mono-tabular text-slate-900 dark:text-white">
                 {(liveDown * 1.06).toFixed(1)}
-                <span className="text-xs font-normal text-slate-500 ml-1">Mbps</span>
+                <span className="text-xs font-normal text-slate-500 dark:text-slate-400 ml-1">
+                  Mbps
+                </span>
               </div>
-              <div className="text-[11px] text-slate-400 font-mono-tabular mt-0.5">
+              <div className="text-[11px] text-slate-400 dark:text-slate-500 font-mono-tabular mt-0.5">
                 {(liveDown / 8).toFixed(1)} MB/s
               </div>
             </div>
@@ -442,7 +475,9 @@ export const SpeedTestModal: React.FC<SpeedTestModalProps> = ({
             onClick={startCheck}
             className="w-full min-h-[46px] px-4 py-2.5 rounded-xl bg-[#15803D] disabled:opacity-50 hover:bg-[#116932] text-white text-sm font-semibold flex items-center justify-center gap-2 transition-colors cursor-pointer whitespace-nowrap"
           >
-            <RotateCw className={`w-4 h-4 ${running ? 'animate-spin' : ''}`} />
+            <RotateCw
+              className={`w-4 h-4 ${running ? 'animate-spin' : ''}`}
+            />
             <span className={language === 'ur' ? 'font-urdu' : ''}>
               {running
                 ? language === 'ur'

@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useCallback, useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Menu,
   ThumbsUp,
@@ -15,6 +15,8 @@ import {
   WifiOff,
   ShieldCheck,
   AlertCircle,
+  RefreshCw,
+  X,
 } from 'lucide-react';
 import {
   ConnectionStatus,
@@ -52,8 +54,86 @@ import { UpdatesModal } from './components/UpdatesModal';
 
 const LAST_SERVER_STORAGE_KEY = 'skp_vpn_last_server_id';
 const AUTO_RECONNECT_STORAGE_KEY = 'skp_vpn_auto_reconnect';
+const DARK_MODE_STORAGE_KEY = 'skp_vpn_dark_mode';
+const BATTERY_BANNER_STORAGE_KEY = 'skp_vpn_show_battery_banner';
 const MAX_RECONNECT_ATTEMPTS = 5;
 const BACKOFF_SECONDS = [2, 3, 5, 8, 12];
+
+const COLO_TO_SERVER_ID: Record<string, string> = {
+  KHI: 'pk-khi',
+  ISB: 'pk-isb',
+  LHE: 'pk-isb',
+  PEW: 'pk-isb',
+  MUX: 'pk-khi',
+  DXB: 'ae-1',
+  AUH: 'ae-1',
+  MCT: 'ae-1',
+  DOH: 'ae-1',
+  BAH: 'ae-1',
+  RUH: 'ae-1',
+  JED: 'ae-1',
+  SIN: 'sg-1',
+  KUL: 'sg-1',
+  BKK: 'sg-1',
+  BOM: 'sg-1',
+  DEL: 'sg-1',
+  NRT: 'jp-1',
+  KIX: 'jp-1',
+  ICN: 'jp-1',
+  HKG: 'jp-1',
+  TPE: 'jp-1',
+  FRA: 'de-1',
+  MUC: 'de-1',
+  BER: 'de-1',
+  DUS: 'de-1',
+  HAM: 'de-1',
+  ZRH: 'ch-1',
+  GVA: 'ch-1',
+  VIE: 'ch-1',
+  MXP: 'ch-1',
+  AMS: 'nl-1',
+  BRU: 'nl-1',
+  LHR: 'uk-1',
+  MAN: 'uk-1',
+  EDI: 'uk-1',
+  DUB: 'uk-1',
+  CDG: 'fr-1',
+  MRS: 'fr-1',
+  MAD: 'fr-1',
+  LAX: 'us-west',
+  SJC: 'us-west',
+  SFO: 'us-west',
+  SEA: 'us-west',
+  DEN: 'us-west',
+  DFW: 'us-west',
+  IAD: 'us-east',
+  EWR: 'us-east',
+  JFK: 'us-east',
+  ORD: 'us-east',
+  MIA: 'us-east',
+  ATL: 'us-east',
+  BOS: 'us-east',
+  YYZ: 'ca-1',
+  YVR: 'ca-1',
+  YUL: 'ca-1',
+};
+
+function pickOptimalConcreteServer(colo?: string): ServerLocation {
+  if (colo) {
+    const upper = colo.trim().toUpperCase();
+    const mappedId = COLO_TO_SERVER_ID[upper];
+    if (mappedId) {
+      const matched = SERVER_LOCATIONS.find((s) => s.id === mappedId);
+      if (matched) return matched;
+    }
+  }
+  const concrete = SERVER_LOCATIONS.filter((s) => s.id !== 'auto');
+  concrete.sort(
+    (a, b) =>
+      a.basePingMs + a.loadPercent * 0.25 - (b.basePingMs + b.loadPercent * 0.25)
+  );
+  return concrete[0] ?? SERVER_LOCATIONS[1] ?? SERVER_LOCATIONS[0];
+}
 
 function loadInitialLastServer(): ServerLocation {
   try {
@@ -80,6 +160,30 @@ function loadInitialAutoReconnect(): boolean {
   return true;
 }
 
+function loadInitialDarkMode(): boolean {
+  try {
+    const saved = window.localStorage.getItem(DARK_MODE_STORAGE_KEY);
+    if (saved !== null) {
+      return saved === 'true';
+    }
+  } catch {
+    // Ignore storage errors
+  }
+  return false;
+}
+
+function loadInitialBatteryBanner(): boolean {
+  try {
+    const saved = window.localStorage.getItem(BATTERY_BANNER_STORAGE_KEY);
+    if (saved !== null) {
+      return saved !== 'false';
+    }
+  } catch {
+    // Ignore storage errors
+  }
+  return true;
+}
+
 function formatDuration(totalSeconds: number): string {
   const hrs = Math.floor(totalSeconds / 3600);
   const mins = Math.floor((totalSeconds % 3600) / 60);
@@ -93,18 +197,22 @@ export default function App() {
   const initialServer = loadInitialLastServer();
   const nativeMode = isNativeAndroidVpn();
 
+  const [darkMode, setDarkMode] = useState<boolean>(loadInitialDarkMode);
+
   const [status, setStatus] = useState<ConnectionStatus>(
     ConnectionStatus.Disconnected
   );
   const [selectedServer, setSelectedServer] =
     useState<ServerLocation>(initialServer);
+  const [autoResolvedServer, setAutoResolvedServer] =
+    useState<ServerLocation | null>(null);
   const [lastUsedServer, setLastUsedServer] =
     useState<ServerLocation>(initialServer);
   const [autoReconnect, setAutoReconnect] = useState<boolean>(
     loadInitialAutoReconnect
   );
 
-  // Native Android WireGuard state
+  // Native Android WireGuard & OTA state
   const [nativeDetail, setNativeDetail] = useState<string>('');
   const [nativeError, setNativeError] = useState<string>('');
   const [nativeExitIp, setNativeExitIp] = useState<string>('');
@@ -112,6 +220,8 @@ export default function App() {
   const [nativeEndpoint, setNativeEndpoint] = useState<string>('');
   const [nativeRxBytes, setNativeRxBytes] = useState<number>(0);
   const [nativeTxBytes, setNativeTxBytes] = useState<number>(0);
+  const [otaStatus, setOtaStatus] = useState<string>('idle');
+  const [otaVersion, setOtaVersion] = useState<string>('');
 
   // Auto-reconnect runtime state
   const [reconnectAttempt, setReconnectAttempt] = useState<number>(0);
@@ -132,8 +242,19 @@ export default function App() {
   const [splitApps, setSplitApps] =
     useState<SplitTunnelApp[]>(INITIAL_SPLIT_APPS);
 
-  // Notice banner state
-  const [showOrangeBanner, setShowOrangeBanner] = useState<boolean>(true);
+  // Notice banner state (persisted so closing via X icon stays closed)
+  const [showOrangeBanner, setShowOrangeBanner] = useState<boolean>(
+    loadInitialBatteryBanner
+  );
+
+  const handleSetShowOrangeBanner = useCallback((visible: boolean) => {
+    setShowOrangeBanner(visible);
+    try {
+      window.localStorage.setItem(BATTERY_BANNER_STORAGE_KEY, String(visible));
+    } catch {
+      // Ignore storage errors
+    }
+  }, []);
 
   // Modals & Drawers
   const [drawerOpen, setDrawerOpen] = useState<boolean>(false);
@@ -158,6 +279,24 @@ export default function App() {
   const isBankingBypassed =
     splitApps.find((app) => app.id === 'banking')?.enabled === false;
 
+  // Sync Dark Mode class on <html>, persist in localStorage, and update browser theme-color
+  useEffect(() => {
+    document.documentElement.classList.toggle('dark', darkMode);
+    try {
+      window.localStorage.setItem(DARK_MODE_STORAGE_KEY, String(darkMode));
+    } catch {
+      // Ignore storage errors
+    }
+    const metaTheme = document.querySelector('meta[name="theme-color"]');
+    if (metaTheme) {
+      metaTheme.setAttribute('content', darkMode ? '#051B11' : '#0B5D32');
+    }
+  }, [darkMode]);
+
+  const handleToggleDarkMode = useCallback(() => {
+    setDarkMode((prev) => !prev);
+  }, []);
+
   const saveLastUsedServer = useCallback((srv: ServerLocation) => {
     setLastUsedServer(srv);
     try {
@@ -167,20 +306,53 @@ export default function App() {
     }
   }, []);
 
+  // Whenever connected on Auto select, ensure autoResolvedServer reflects the actual connected server
+  useEffect(() => {
+    if (status === ConnectionStatus.Connected && selectedServer.id === 'auto') {
+      setAutoResolvedServer(pickOptimalConcreteServer(nativeColo));
+    } else if (status === ConnectionStatus.Disconnected) {
+      setAutoResolvedServer(null);
+    }
+  }, [status, selectedServer.id, nativeColo]);
+
+  // Active server displayed on the selector button & used for telemetry/speed checks
+  const displayedServer: ServerLocation = useMemo(() => {
+    if (
+      status === ConnectionStatus.Connected &&
+      selectedServer.id === 'auto' &&
+      autoResolvedServer
+    ) {
+      return autoResolvedServer;
+    }
+    return selectedServer;
+  }, [status, selectedServer, autoResolvedServer]);
+
+  const isShowingAutoResolved =
+    status === ConnectionStatus.Connected &&
+    selectedServer.id === 'auto' &&
+    autoResolvedServer !== null;
+
   const applyNativePayload = useCallback(
     (payload: NativeVpnEventPayload) => {
       setNativeDetail(payload.detail ?? '');
       if (payload.error) {
         setNativeError(payload.error);
-      } else if (payload.state === 'CONNECTED' || payload.state === 'CONNECTING') {
+      } else if (
+        payload.state === 'CONNECTED' ||
+        payload.state === 'CONNECTING'
+      ) {
         setNativeError('');
       }
 
       if (payload.exitIp !== undefined) setNativeExitIp(payload.exitIp);
       if (payload.colo !== undefined) setNativeColo(payload.colo);
       if (payload.endpoint !== undefined) setNativeEndpoint(payload.endpoint);
-      if (typeof payload.rxBytes === 'number') setNativeRxBytes(payload.rxBytes);
-      if (typeof payload.txBytes === 'number') setNativeTxBytes(payload.txBytes);
+      if (typeof payload.rxBytes === 'number')
+        setNativeRxBytes(payload.rxBytes);
+      if (typeof payload.txBytes === 'number')
+        setNativeTxBytes(payload.txBytes);
+      if (payload.otaStatus) setOtaStatus(payload.otaStatus);
+      if (payload.otaVersion !== undefined) setOtaVersion(payload.otaVersion);
 
       if (payload.serverId) {
         const matched = SERVER_LOCATIONS.find((s) => s.id === payload.serverId);
@@ -347,8 +519,16 @@ export default function App() {
             setReconnectAttempt(0);
             setDropReason(null);
             setSelectedServer(targetServer);
+            if (targetServer.id === 'auto') {
+              setAutoResolvedServer(pickOptimalConcreteServer());
+            }
             saveLastUsedServer(targetServer);
             setStatus(ConnectionStatus.Connected);
+
+            const connectedDisplay =
+              targetServer.id === 'auto'
+                ? pickOptimalConcreteServer()
+                : targetServer;
 
             const timestamp = new Date().toLocaleTimeString([], {
               hour: '2-digit',
@@ -359,8 +539,8 @@ export default function App() {
             setReconnectLogs((prev) => [
               {
                 id: `${Date.now()}-ok`,
-                serverNameEn: targetServer.nameEn,
-                serverNameUr: targetServer.nameUr,
+                serverNameEn: connectedDisplay.nameEn,
+                serverNameUr: connectedDisplay.nameUr,
                 reason,
                 attempts: attemptNumber,
                 outcome: 'recovered',
@@ -370,7 +550,7 @@ export default function App() {
             ]);
 
             setRecoveryBannerMessage(
-              `Restored tunnel to ${targetServer.nameEn} (${timestamp})`
+              `Restored tunnel to ${connectedDisplay.nameEn} (${timestamp})`
             );
             if (recoveryMessageTimerRef.current !== null) {
               window.clearTimeout(recoveryMessageTimerRef.current);
@@ -457,8 +637,16 @@ export default function App() {
       setReconnectAttempt(0);
       setDropReason(null);
       setSelectedServer(lastUsedServer);
+      if (lastUsedServer.id === 'auto') {
+        setAutoResolvedServer(pickOptimalConcreteServer());
+      }
       saveLastUsedServer(lastUsedServer);
       setStatus(ConnectionStatus.Connected);
+
+      const connectedDisplay =
+        lastUsedServer.id === 'auto'
+          ? pickOptimalConcreteServer()
+          : lastUsedServer;
 
       const timestamp = new Date().toLocaleTimeString([], {
         hour: '2-digit',
@@ -469,8 +657,8 @@ export default function App() {
       setReconnectLogs((prev) => [
         {
           id: `${Date.now()}-ok`,
-          serverNameEn: lastUsedServer.nameEn,
-          serverNameUr: lastUsedServer.nameUr,
+          serverNameEn: connectedDisplay.nameEn,
+          serverNameUr: connectedDisplay.nameUr,
           reason: dropReason ?? 'tunnel_drop',
           attempts: currentAttempt,
           outcome: 'recovered',
@@ -480,7 +668,7 @@ export default function App() {
       ]);
 
       setRecoveryBannerMessage(
-        `Restored tunnel to ${lastUsedServer.nameEn} (${timestamp})`
+        `Restored tunnel to ${connectedDisplay.nameEn} (${timestamp})`
       );
     }, 850);
   }, [
@@ -528,7 +716,7 @@ export default function App() {
       return;
     }
 
-    const loadBonus = Math.round((100 - selectedServer.loadPercent) * 0.45);
+    const loadBonus = Math.round((100 - displayedServer.loadPercent) * 0.45);
     const baseDown = 48.2 + loadBonus;
     const baseUp = Number((baseDown * 0.42).toFixed(1));
     setDownSpeedMbps(baseDown);
@@ -545,7 +733,7 @@ export default function App() {
     }, 1000);
 
     return () => window.clearInterval(interval);
-  }, [nativeMode, status, selectedServer]);
+  }, [nativeMode, status, displayedServer]);
 
   const handleToggleConnection = useCallback(() => {
     clearAllTimers();
@@ -581,6 +769,7 @@ export default function App() {
       setStatus(ConnectionStatus.Disconnecting);
       transitionTimerRef.current = window.setTimeout(() => {
         setStatus(ConnectionStatus.Disconnected);
+        setAutoResolvedServer(null);
         setSessionSeconds(0);
       }, 650);
     } else if (
@@ -593,12 +782,16 @@ export default function App() {
       setReconnectCountdown(0);
       setReconnectHandshakeActive(false);
       setStatus(ConnectionStatus.Disconnected);
+      setAutoResolvedServer(null);
       setSessionSeconds(0);
     } else {
       setDropReason(null);
       setStatus(ConnectionStatus.Connecting);
       transitionTimerRef.current = window.setTimeout(() => {
         setSessionSeconds(0);
+        if (selectedServer.id === 'auto') {
+          setAutoResolvedServer(pickOptimalConcreteServer());
+        }
         saveLastUsedServer(selectedServer);
         setStatus(ConnectionStatus.Connected);
       }, 1150);
@@ -616,6 +809,7 @@ export default function App() {
   const handleSelectServer = useCallback(
     (srv: ServerLocation) => {
       setSelectedServer(srv);
+      setAutoResolvedServer(null);
       setDropReason(null);
       setRecoveryBannerMessage(null);
       setNativeError('');
@@ -630,10 +824,19 @@ export default function App() {
       setStatus(ConnectionStatus.Connecting);
       transitionTimerRef.current = window.setTimeout(() => {
         setSessionSeconds(0);
+        if (srv.id === 'auto') {
+          setAutoResolvedServer(pickOptimalConcreteServer());
+        }
         setStatus(ConnectionStatus.Connected);
       }, 950);
     },
-    [clearAllTimers, isBankingBypassed, nativeMode, protocol, saveLastUsedServer]
+    [
+      clearAllTimers,
+      isBankingBypassed,
+      nativeMode,
+      protocol,
+      saveLastUsedServer,
+    ]
   );
 
   const handleToggleSplitApp = useCallback((id: string) => {
@@ -648,7 +851,11 @@ export default function App() {
 
   const statusText =
     status === ConnectionStatus.Connected
-      ? t.connected
+      ? isShowingAutoResolved
+        ? language === 'ur'
+          ? `آٹو کنیکٹڈ: ${displayedServer.nameUr}`
+          : `Connected · ${displayedServer.nameEn}`
+        : t.connected
       : status === ConnectionStatus.Reconnecting
       ? `${t.reconnecting} (${reconnectAttempt}/${MAX_RECONNECT_ATTEMPTS})`
       : status === ConnectionStatus.Connecting
@@ -663,16 +870,16 @@ export default function App() {
 
   const displayedVirtualIp =
     status === ConnectionStatus.Connected
-      ? nativeExitIp || selectedServer.virtualIp
+      ? nativeExitIp || displayedServer.virtualIp
       : 'Unmasked (Disconnected)';
 
   return (
     <div
       dir={language === 'ur' ? 'rtl' : 'ltr'}
-      className="min-h-screen bg-[#147A42] text-slate-900 flex flex-col"
+      className="min-h-screen bg-[#147A42] dark:bg-[#061A11] text-slate-900 dark:text-slate-100 flex flex-col transition-colors duration-200"
     >
       {/* Desktop Top Bar (3-zone contract) */}
-      <header className="hidden lg:flex items-center justify-between gap-8 px-8 py-3.5 bg-[#0B5D32] text-white border-b border-white/15">
+      <header className="hidden lg:flex items-center justify-between gap-8 px-8 py-3.5 bg-[#0B5D32] dark:bg-[#051B11] text-white border-b border-white/15 dark:border-emerald-900/50">
         <div className="text-lg font-bold tracking-tight text-white whitespace-nowrap shrink-0">
           SKP VPN
         </div>
@@ -719,22 +926,22 @@ export default function App() {
           <button
             type="button"
             onClick={() => setSpeedModalOpen(true)}
-            className="px-4 py-2 text-xs font-semibold text-[#0B5D32] bg-white hover:bg-emerald-50 rounded-lg transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+            className="px-4 py-2 text-xs font-semibold text-[#0B5D32] dark:text-slate-950 bg-white dark:bg-emerald-400 hover:bg-emerald-50 dark:hover:bg-emerald-300 rounded-lg transition-colors whitespace-nowrap shrink-0 cursor-pointer"
           >
             Fast Speed Check
           </button>
         </div>
       </header>
 
-      {/* Main Responsive Workspace on Vibrant Green Background */}
+      {/* Main Responsive Workspace */}
       <main className="flex-1 w-full max-w-6xl mx-auto lg:px-8 lg:py-7">
         <div className="grid grid-cols-1 lg:grid-cols-12 lg:gap-8 items-start">
           {/* LEFT / PRIMARY COLUMN: SKP VPN Mobile-First Interface */}
-          <section className="lg:col-span-5 w-full bg-[#116938] lg:rounded-2xl lg:overflow-hidden lg:border lg:border-white/15 lg:shadow-md">
-            {/* SKP VPN Deep Emerald Top Bar (#0B5D32) */}
+          <section className="lg:col-span-5 w-full bg-[#116938] dark:bg-[#092116] lg:rounded-2xl lg:overflow-hidden lg:border lg:border-white/15 dark:lg:border-emerald-900/50 lg:shadow-md transition-colors duration-200">
+            {/* SKP VPN Deep Emerald Top Bar */}
             <div
               dir="ltr"
-              className="bg-[#0B5D32] text-white h-[58px] px-3 flex items-center justify-between select-none"
+              className="bg-[#0B5D32] dark:bg-[#051B11] text-white h-[58px] px-3 flex items-center justify-between select-none border-b border-transparent dark:border-emerald-900/40"
             >
               <div className="flex items-center gap-3">
                 <button
@@ -767,7 +974,10 @@ export default function App() {
                   title="Fast Internet Speed Check"
                   className="min-w-[44px] min-h-[44px] rounded-full flex items-center justify-center hover:bg-white/15 active:bg-white/20 transition-colors cursor-pointer"
                 >
-                  <Gauge className="w-[22px] h-[22px] text-white" strokeWidth={2.1} />
+                  <Gauge
+                    className="w-[22px] h-[22px] text-white"
+                    strokeWidth={2.1}
+                  />
                 </button>
 
                 <button
@@ -776,51 +986,86 @@ export default function App() {
                   aria-label="Choose server location"
                   className="min-w-[44px] min-h-[44px] flex items-center justify-center cursor-pointer"
                 >
-                  <span className="w-9 h-9 rounded-full bg-[#15803D] hover:bg-[#16A34A] border border-white/25 flex items-center justify-center transition-colors">
+                  <span className="w-9 h-9 rounded-full bg-[#15803D] dark:bg-emerald-700 hover:bg-[#16A34A] dark:hover:bg-emerald-600 border border-white/25 flex items-center justify-center transition-colors">
                     <Globe className="w-5 h-5 text-white" strokeWidth={1.8} />
                   </span>
                 </button>
               </div>
             </div>
 
-            {/* Orange Battery Optimization & 5-Star Support Banner */}
-            {showOrangeBanner && (
-              <button
-                type="button"
-                onClick={() => setSupportModalOpen(true)}
-                className="w-full text-left bg-[#F48A24] hover:bg-[#EC811B] active:bg-[#E07916] text-white px-4 py-3 text-[13.5px] leading-[1.38] font-medium transition-colors cursor-pointer shadow-xs"
-              >
-                <span className={language === 'ur' ? 'font-urdu block' : ''}>
-                  {t.bannerText}{' '}
-                  <span className="underline decoration-white/70 underline-offset-2 font-semibold">
-                    {t.bannerCta}
-                  </span>
+            {/* Instant Auto-Update Banner (visible automatically when an OTA update downloads on app open) */}
+            {otaStatus === 'downloading' && (
+              <div className="w-full bg-emerald-950 text-emerald-200 px-4 py-2 text-xs font-medium flex items-center justify-center gap-2 border-b border-emerald-800/60">
+                <RefreshCw className="w-3.5 h-3.5 animate-spin text-emerald-400 shrink-0" />
+                <span className={language === 'ur' ? 'font-urdu' : ''}>
+                  {language === 'ur'
+                    ? `نئی اپڈیٹ (${otaVersion || 'Latest'}) خودکار انسٹال ہو رہی ہے...`
+                    : `Auto-updating SKP VPN ${otaVersion ? `to ${otaVersion}` : ''}...`}
                 </span>
-              </button>
+              </div>
             )}
 
-            {/* Main Card Container over Rich Green Background */}
+            {/* Orange Battery Optimization & 5-Star Support Banner with Close Icon */}
+            {showOrangeBanner && (
+              <div className="w-full bg-[#F48A24] dark:bg-[#B86111] text-white flex items-start justify-between shadow-xs transition-colors">
+                <button
+                  type="button"
+                  onClick={() => setSupportModalOpen(true)}
+                  className="flex-1 min-w-0 text-start hover:bg-black/5 active:bg-black/10 ps-4 pe-2 py-3 text-[13.5px] leading-[1.38] font-medium transition-colors cursor-pointer"
+                >
+                  <span className={language === 'ur' ? 'font-urdu block' : ''}>
+                    {t.bannerText}{' '}
+                    <span className="underline decoration-white/70 underline-offset-2 font-semibold">
+                      {t.bannerCta}
+                    </span>
+                  </span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => handleSetShowOrangeBanner(false)}
+                  aria-label={
+                    language === 'ur'
+                      ? 'بیٹری آپٹیمائزیشن نوٹس بند کریں'
+                      : 'Close battery optimization notice'
+                  }
+                  title={
+                    language === 'ur'
+                      ? 'نوٹس بند کریں'
+                      : 'Dismiss battery notice'
+                  }
+                  className="min-w-[44px] min-h-[44px] shrink-0 flex items-center justify-center text-white/90 hover:text-white hover:bg-black/10 active:bg-black/20 rounded-es-xl transition-colors cursor-pointer"
+                >
+                  <X className="w-4 h-4" strokeWidth={2.5} />
+                </button>
+              </div>
+            )}
+
+            {/* Main Card Container */}
             <div className="p-3.5 sm:p-4 space-y-3.5">
-              {/* Primary White SKP VPN Connection Card */}
-              <div className="bg-white rounded-xl shadow-sm px-5 pt-6 pb-5 flex flex-col items-center">
-                {/* Emerald Rounded Server Selector Button */}
+              {/* Primary Connection Card */}
+              <div className="bg-white dark:bg-[#0F2018] rounded-xl shadow-sm border border-transparent dark:border-emerald-900/40 px-5 pt-6 pb-5 flex flex-col items-center transition-colors duration-200">
+                {/* Emerald Rounded Server Selector Button (shows actual connected server + flag when Auto-Select connects!) */}
                 <button
                   type="button"
                   onClick={() => setServerModalOpen(true)}
-                  className="w-full max-w-[276px] h-[54px] bg-[#15803D] hover:bg-[#116932] active:scale-[0.99] text-white rounded-full px-3.5 flex items-center justify-between shadow-xs transition-all cursor-pointer"
+                  className="w-full max-w-[292px] h-[54px] bg-[#15803D] dark:bg-[#126B34] hover:bg-[#116932] dark:hover:bg-[#15803D] active:scale-[0.99] text-white rounded-full px-3.5 flex items-center justify-between shadow-xs transition-all cursor-pointer"
                 >
                   <FlagIcon
-                    countryCode={selectedServer.countryCode}
+                    countryCode={displayedServer.countryCode}
                     size="md"
                   />
                   <span
-                    className={`text-[17px] font-medium truncate px-2 ${
+                    className={`text-[16px] font-medium truncate px-2 ${
                       language === 'ur' ? 'font-urdu' : ''
                     }`}
                   >
                     {language === 'ur'
-                      ? selectedServer.nameUr
-                      : selectedServer.nameEn}
+                      ? isShowingAutoResolved
+                        ? `${displayedServer.nameUr} (آٹو)`
+                        : displayedServer.nameUr
+                      : isShowingAutoResolved
+                      ? `${displayedServer.nameEn} · Auto`
+                      : displayedServer.nameEn}
                   </span>
                   <ChevronDown
                     className="w-5 h-5 text-white/95 shrink-0 mr-1"
@@ -832,15 +1077,15 @@ export default function App() {
                 <div
                   className={`mt-4 mb-1 text-[16px] font-medium text-center font-mono-tabular px-2 ${
                     status === ConnectionStatus.Connected
-                      ? 'text-[#15803D]'
+                      ? 'text-[#15803D] dark:text-emerald-400'
                       : status === ConnectionStatus.Reconnecting
-                      ? 'text-[#D9720D]'
+                      ? 'text-[#D9720D] dark:text-amber-400'
                       : status === ConnectionStatus.Connecting ||
                         status === ConnectionStatus.Disconnecting
-                      ? 'text-[#F48A24]'
+                      ? 'text-[#F48A24] dark:text-amber-400'
                       : dropReason || nativeError
-                      ? 'text-rose-600'
-                      : 'text-slate-500'
+                      ? 'text-rose-600 dark:text-rose-400'
+                      : 'text-slate-500 dark:text-slate-400'
                   } ${language === 'ur' ? 'font-urdu' : ''}`}
                 >
                   {statusText}
@@ -853,10 +1098,11 @@ export default function App() {
                   connectLabel={t.connectBtn}
                   disconnectLabel={t.disconnectBtn}
                   cancelLabel={t.cancelBtn}
+                  darkMode={darkMode}
                 />
 
                 {/* Quiet Unboxed Live Session or Reconnect Telemetry */}
-                <div className="mt-2 min-h-[24px] flex flex-wrap items-center justify-center gap-2 text-xs text-slate-500 font-mono-tabular text-center">
+                <div className="mt-2 min-h-[24px] flex flex-wrap items-center justify-center gap-2 text-xs text-slate-500 dark:text-slate-400 font-mono-tabular text-center">
                   {status === ConnectionStatus.Connected ? (
                     nativeMode ? (
                       <>
@@ -877,7 +1123,7 @@ export default function App() {
                     )
                   ) : status === ConnectionStatus.Reconnecting ? (
                     <>
-                      <span className="font-sans text-[#D9720D] font-medium">
+                      <span className="font-sans text-[#D9720D] dark:text-amber-400 font-medium">
                         {reconnectHandshakeActive
                           ? `Dialing ${
                               language === 'ur'
@@ -896,7 +1142,7 @@ export default function App() {
                           <button
                             type="button"
                             onClick={handleRetryReconnectNow}
-                            className="font-sans font-semibold text-[#15803D] hover:underline cursor-pointer whitespace-nowrap"
+                            className="font-sans font-semibold text-[#15803D] dark:text-emerald-400 hover:underline cursor-pointer whitespace-nowrap"
                           >
                             {t.retryNow}
                           </button>
@@ -904,17 +1150,17 @@ export default function App() {
                       )}
                     </>
                   ) : (
-                    <span className="font-sans text-slate-400">
+                    <span className="font-sans text-slate-400 dark:text-slate-500">
                       {nativeMode ? 'WireGuard System VPN' : protocol} ·{' '}
-                      {selectedServer.basePingMs} ms
+                      {displayedServer.basePingMs} ms
                     </span>
                   )}
                 </div>
 
                 {/* Real Android System WireGuard Tunnel Confirmation Line */}
                 {status === ConnectionStatus.Connected && (
-                  <div className="mt-1.5 flex items-center justify-center gap-1.5 text-xs text-emerald-700 font-medium text-center">
-                    <ShieldCheck className="w-3.5 h-3.5 shrink-0 text-[#15803D]" />
+                  <div className="mt-1.5 flex items-center justify-center gap-1.5 text-xs text-emerald-700 dark:text-emerald-400 font-medium text-center">
+                    <ShieldCheck className="w-3.5 h-3.5 shrink-0 text-[#15803D] dark:text-emerald-400" />
                     <span className="font-mono-tabular">
                       {nativeMode
                         ? `System VPN Active${
@@ -927,8 +1173,8 @@ export default function App() {
 
                 {/* Native Android Error / Permission Prompt Notice */}
                 {nativeError && status === ConnectionStatus.Disconnected && (
-                  <div className="mt-2.5 w-full rounded-lg bg-rose-50 border border-rose-200 px-3 py-2 text-xs text-rose-700 flex items-start gap-2 text-left">
-                    <AlertCircle className="w-4 h-4 shrink-0 mt-0.5 text-rose-600" />
+                  <div className="mt-2.5 w-full rounded-lg bg-rose-50 dark:bg-rose-950/40 border border-rose-200 dark:border-rose-800/60 px-3 py-2 text-xs text-rose-700 dark:text-rose-300 flex items-start gap-2 text-left">
+                    <AlertCircle className="w-4 h-4 shrink-0 mt-0.5 text-rose-600 dark:text-rose-400" />
                     <span>{nativeError}</span>
                   </div>
                 )}
@@ -936,14 +1182,14 @@ export default function App() {
                 {/* Recovery Confirmation Line */}
                 {recoveryBannerMessage &&
                   status === ConnectionStatus.Connected && (
-                    <div className="mt-2 text-xs text-emerald-700 font-medium text-center">
+                    <div className="mt-2 text-xs text-emerald-700 dark:text-emerald-400 font-medium text-center">
                       {recoveryBannerMessage}
                     </div>
                   )}
 
                 {/* Static "Free Unlimited" Label */}
                 <div
-                  className={`mt-2.5 text-[16px] font-medium text-[#15803D] ${
+                  className={`mt-2.5 text-[16px] font-medium text-[#15803D] dark:text-emerald-400 ${
                     language === 'ur' ? 'font-urdu' : ''
                   }`}
                 >
@@ -953,7 +1199,7 @@ export default function App() {
 
               {/* Inline Fast Internet Speed Check Card */}
               <FastSpeedCheckCard
-                server={selectedServer}
+                server={displayedServer}
                 language={language}
                 lastMetrics={lastSpeedTest}
                 onComplete={setLastSpeedTest}
@@ -961,11 +1207,11 @@ export default function App() {
               />
 
               {/* Auto-Reconnect Guard Bar */}
-              <div className="bg-white rounded-xl shadow-sm px-4 py-3 flex items-center justify-between gap-3">
+              <div className="bg-white dark:bg-[#0F2018] rounded-xl shadow-sm border border-transparent dark:border-emerald-900/40 px-4 py-3 flex items-center justify-between gap-3 transition-colors duration-200">
                 <div className="min-w-0">
-                  <div className="flex items-center gap-1.5 text-xs font-semibold text-slate-800">
+                  <div className="flex items-center gap-1.5 text-xs font-semibold text-slate-800 dark:text-slate-100">
                     <RotateCw
-                      className={`w-3.5 h-3.5 text-[#15803D] shrink-0 ${
+                      className={`w-3.5 h-3.5 text-[#15803D] dark:text-emerald-400 shrink-0 ${
                         status === ConnectionStatus.Reconnecting
                           ? 'animate-spin'
                           : ''
@@ -975,17 +1221,19 @@ export default function App() {
                       {t.autoReconnect}
                     </span>
                   </div>
-                  <div className="text-[11px] text-slate-500 truncate mt-0.5">
+                  <div className="text-[11px] text-slate-500 dark:text-slate-400 truncate mt-0.5">
                     <span>{t.lastServer}:</span>{' '}
-                    <span className="font-medium text-slate-700">
+                    <span className="font-medium text-slate-700 dark:text-slate-200">
                       {language === 'ur'
-                        ? lastUsedServer.nameUr
-                        : lastUsedServer.nameEn}
+                        ? displayedServer.nameUr
+                        : displayedServer.nameEn}
                     </span>
                     {nativeEndpoint && status === ConnectionStatus.Connected ? (
                       <>
                         <span aria-hidden="true"> · </span>
-                        <span className="font-mono-tabular">{nativeEndpoint}</span>
+                        <span className="font-mono-tabular">
+                          {nativeEndpoint}
+                        </span>
                       </>
                     ) : killSwitch ? (
                       <>
@@ -1004,9 +1252,9 @@ export default function App() {
                         handleConnectionDropDetected('tunnel_drop')
                       }
                       title="Simulate an unexpected connection drop to test Auto-Reconnect"
-                      className="min-h-[36px] px-2.5 py-1.5 rounded-lg bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-semibold flex items-center gap-1 transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+                      className="min-h-[36px] px-2.5 py-1.5 rounded-lg bg-slate-100 dark:bg-[#13291F] hover:bg-slate-200 dark:hover:bg-emerald-900/40 text-slate-700 dark:text-slate-200 text-xs font-semibold flex items-center gap-1 transition-colors whitespace-nowrap shrink-0 cursor-pointer"
                     >
-                      <WifiOff className="w-3.5 h-3.5 text-slate-500" />
+                      <WifiOff className="w-3.5 h-3.5 text-slate-500 dark:text-slate-400" />
                       <span>{t.testDrop}</span>
                     </button>
                   )}
@@ -1019,7 +1267,9 @@ export default function App() {
                       aria-checked={autoReconnect}
                       onClick={handleToggleAutoReconnect}
                       className={`w-11 h-6 rounded-full p-0.5 transition-colors cursor-pointer ${
-                        autoReconnect ? 'bg-[#15803D]' : 'bg-slate-300'
+                        autoReconnect
+                          ? 'bg-[#15803D] dark:bg-emerald-500'
+                          : 'bg-slate-300 dark:bg-slate-700'
                       }`}
                     >
                       <span
@@ -1037,15 +1287,15 @@ export default function App() {
           {/* RIGHT COMPANION WORKSPACE (Visible on Desktop lg:) */}
           <section className="hidden lg:flex lg:col-span-7 flex-col gap-6">
             {/* Live Connection Diagnostics & Fast Speed Summary */}
-            <div className="bg-white rounded-2xl shadow-sm p-6 space-y-5">
+            <div className="bg-white dark:bg-[#0F2018] rounded-2xl shadow-sm border border-transparent dark:border-emerald-900/40 p-6 space-y-5 transition-colors duration-200">
               <div className="flex items-center justify-between gap-4">
                 <div>
-                  <h1 className="text-xl font-bold text-slate-900">
+                  <h1 className="text-xl font-bold text-slate-900 dark:text-slate-100">
                     Tunnel Diagnostics &amp; Speed Monitor
                   </h1>
-                  <p className="text-xs text-slate-500 mt-0.5">
+                  <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">
                     {protocol} · Virtual IP{' '}
-                    <span className="font-mono-tabular text-slate-700 font-medium">
+                    <span className="font-mono-tabular text-slate-700 dark:text-slate-200 font-medium">
                       {status === ConnectionStatus.Connected
                         ? displayedVirtualIp
                         : status === ConnectionStatus.Reconnecting
@@ -1061,9 +1311,9 @@ export default function App() {
                     onClick={() =>
                       setLanguage(language === 'en' ? 'ur' : 'en')
                     }
-                    className="min-h-[40px] px-3.5 py-2 rounded-xl border border-slate-200 hover:bg-slate-50 text-xs font-semibold text-slate-700 flex items-center gap-1.5 transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+                    className="min-h-[40px] px-3.5 py-2 rounded-xl border border-slate-200 dark:border-emerald-900/50 hover:bg-slate-50 dark:hover:bg-[#13291F] text-xs font-semibold text-slate-700 dark:text-slate-200 flex items-center gap-1.5 transition-colors whitespace-nowrap shrink-0 cursor-pointer"
                   >
-                    <Languages className="w-4 h-4 text-[#15803D]" />
+                    <Languages className="w-4 h-4 text-[#15803D] dark:text-emerald-400" />
                     <span>{language === 'en' ? 'اردو (Urdu)' : 'English'}</span>
                   </button>
 
@@ -1078,27 +1328,33 @@ export default function App() {
                 </div>
               </div>
 
-              <div className="grid grid-cols-3 gap-4 pt-1 border-t border-slate-100">
+              <div className="grid grid-cols-3 gap-4 pt-1 border-t border-slate-100 dark:border-emerald-900/40">
                 <div className="pt-3">
-                  <div className="text-xs text-slate-500">{t.duration}</div>
-                  <div className="text-2xl font-bold font-mono-tabular text-slate-900 mt-1">
+                  <div className="text-xs text-slate-500 dark:text-slate-400">
+                    {t.duration}
+                  </div>
+                  <div className="text-2xl font-bold font-mono-tabular text-slate-900 dark:text-white mt-1">
                     {formatDuration(sessionSeconds)}
                   </div>
                 </div>
                 <div className="pt-3">
-                  <div className="text-xs text-slate-500">{t.download}</div>
-                  <div className="text-2xl font-bold font-mono-tabular text-slate-900 mt-1">
+                  <div className="text-xs text-slate-500 dark:text-slate-400">
+                    {t.download}
+                  </div>
+                  <div className="text-2xl font-bold font-mono-tabular text-slate-900 dark:text-white mt-1">
                     {downSpeedMbps.toFixed(1)}{' '}
-                    <span className="text-xs font-normal text-slate-500">
+                    <span className="text-xs font-normal text-slate-500 dark:text-slate-400">
                       Mbps
                     </span>
                   </div>
                 </div>
                 <div className="pt-3">
-                  <div className="text-xs text-slate-500">{t.upload}</div>
-                  <div className="text-2xl font-bold font-mono-tabular text-slate-900 mt-1">
+                  <div className="text-xs text-slate-500 dark:text-slate-400">
+                    {t.upload}
+                  </div>
+                  <div className="text-2xl font-bold font-mono-tabular text-slate-900 dark:text-white mt-1">
                     {upSpeedMbps.toFixed(1)}{' '}
-                    <span className="text-xs font-normal text-slate-500">
+                    <span className="text-xs font-normal text-slate-500 dark:text-slate-400">
                       Mbps
                     </span>
                   </div>
@@ -1106,15 +1362,15 @@ export default function App() {
               </div>
 
               {reconnectLogs.length > 0 && (
-                <div className="pt-4 border-t border-slate-100 space-y-2">
-                  <div className="flex items-center justify-between text-xs text-slate-500">
-                    <span className="font-semibold text-slate-700">
+                <div className="pt-4 border-t border-slate-100 dark:border-emerald-900/40 space-y-2">
+                  <div className="flex items-center justify-between text-xs text-slate-500 dark:text-slate-400">
+                    <span className="font-semibold text-slate-700 dark:text-slate-200">
                       Recent Auto-Reconnect Events
                     </span>
                     <button
                       type="button"
                       onClick={() => setReconnectLogs([])}
-                      className="text-slate-400 hover:text-slate-700 transition-colors cursor-pointer"
+                      className="text-slate-400 hover:text-slate-700 dark:hover:text-slate-200 transition-colors cursor-pointer"
                     >
                       Clear
                     </button>
@@ -1123,14 +1379,14 @@ export default function App() {
                     {reconnectLogs.map((entry) => (
                       <div
                         key={entry.id}
-                        className="flex items-center justify-between text-xs text-slate-600 py-1"
+                        className="flex items-center justify-between text-xs text-slate-600 dark:text-slate-300 py-1"
                       >
                         <div className="flex items-center gap-2 min-w-0 truncate">
                           <span
                             className={`font-semibold ${
                               entry.outcome === 'recovered'
-                                ? 'text-emerald-700'
-                                : 'text-rose-600'
+                                ? 'text-emerald-700 dark:text-emerald-400'
+                                : 'text-rose-600 dark:text-rose-400'
                             }`}
                           >
                             {entry.outcome === 'recovered'
@@ -1140,12 +1396,12 @@ export default function App() {
                           <span aria-hidden="true">·</span>
                           <span className="truncate">{entry.serverNameEn}</span>
                           <span aria-hidden="true">·</span>
-                          <span className="font-mono-tabular text-slate-500">
+                          <span className="font-mono-tabular text-slate-500 dark:text-slate-400">
                             {entry.attempts}{' '}
                             {entry.attempts === 1 ? 'attempt' : 'attempts'}
                           </span>
                         </div>
-                        <span className="font-mono-tabular text-slate-400 shrink-0 ml-3">
+                        <span className="font-mono-tabular text-slate-400 dark:text-slate-500 shrink-0 ml-3">
                           {entry.timestamp}
                         </span>
                       </div>
@@ -1155,9 +1411,9 @@ export default function App() {
               )}
 
               {lastSpeedTest && (
-                <div className="pt-3 border-t border-slate-100 flex items-center justify-between text-xs text-slate-500">
+                <div className="pt-3 border-t border-slate-100 dark:border-emerald-900/40 flex items-center justify-between text-xs text-slate-500 dark:text-slate-400">
                   <span>Last Speed Check ({lastSpeedTest.timestamp})</span>
-                  <span className="font-mono-tabular text-slate-700 font-medium">
+                  <span className="font-mono-tabular text-slate-700 dark:text-slate-200 font-medium">
                     Ping {lastSpeedTest.pingMs} ms (Loaded{' '}
                     {lastSpeedTest.loadedPingMs} ms) · Down{' '}
                     {lastSpeedTest.downloadMbps} Mbps · Up{' '}
@@ -1167,19 +1423,19 @@ export default function App() {
               )}
             </div>
 
-            {/* All Free Unlocked Global Proxy Nodes (Featuring Pakistan Karachi & Islamabad) */}
-            <div className="bg-white rounded-2xl shadow-sm p-6">
+            {/* All Free Unlocked Global Proxy Nodes */}
+            <div className="bg-white dark:bg-[#0F2018] rounded-2xl shadow-sm border border-transparent dark:border-emerald-900/40 p-6 transition-colors duration-200">
               <div className="flex items-center justify-between mb-4">
                 <div>
-                  <h2 className="text-base font-bold text-slate-900">
+                  <h2 className="text-base font-bold text-slate-900 dark:text-slate-100">
                     Free Global Proxy Nodes
                   </h2>
-                  <p className="text-xs text-slate-500">
+                  <p className="text-xs text-slate-500 dark:text-slate-400">
                     Includes Pakistan (Karachi &amp; Islamabad) &amp; global
                     locations — 100% free
                   </p>
                 </div>
-                <span className="text-xs text-slate-500 font-mono-tabular">
+                <span className="text-xs text-slate-500 dark:text-slate-400 font-mono-tabular">
                   {SERVER_LOCATIONS.length} Free Nodes
                 </span>
               </div>
@@ -1188,6 +1444,11 @@ export default function App() {
                 <ServerListContent
                   servers={SERVER_LOCATIONS}
                   selectedServerId={selectedServer.id}
+                  activeConnectedServerId={
+                    status === ConnectionStatus.Connected
+                      ? displayedServer.id
+                      : null
+                  }
                   language={language}
                   onSelectServer={handleSelectServer}
                 />
@@ -1201,12 +1462,14 @@ export default function App() {
       <DrawerMenu
         isOpen={drawerOpen}
         language={language}
+        darkMode={darkMode}
         protocol={protocol}
         splitApps={splitApps}
         killSwitch={killSwitch}
         autoReconnect={autoReconnect}
         lastUsedServer={lastUsedServer}
         status={status}
+        onToggleDarkMode={handleToggleDarkMode}
         onSelectProtocol={setProtocol}
         onToggleSplitApp={handleToggleSplitApp}
         onToggleKillSwitch={() => setKillSwitch((prev) => !prev)}
@@ -1224,6 +1487,9 @@ export default function App() {
         onClose={() => setServerModalOpen(false)}
         servers={SERVER_LOCATIONS}
         selectedServerId={selectedServer.id}
+        activeConnectedServerId={
+          status === ConnectionStatus.Connected ? displayedServer.id : null
+        }
         language={language}
         onSelectServer={handleSelectServer}
       />
@@ -1232,13 +1498,13 @@ export default function App() {
         isOpen={supportModalOpen}
         language={language}
         showBanner={showOrangeBanner}
-        onToggleBanner={setShowOrangeBanner}
+        onToggleBanner={handleSetShowOrangeBanner}
         onClose={() => setSupportModalOpen(false)}
       />
 
       <SpeedTestModal
         isOpen={speedModalOpen}
-        server={selectedServer}
+        server={displayedServer}
         language={language}
         onComplete={setLastSpeedTest}
         onClose={() => setSpeedModalOpen(false)}
@@ -1247,6 +1513,7 @@ export default function App() {
       <UpdatesModal
         isOpen={updatesModalOpen}
         language={language}
+        otaStatus={otaStatus}
         onClose={() => setUpdatesModalOpen(false)}
       />
     </div>

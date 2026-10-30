@@ -7,6 +7,7 @@ import android.app.PendingIntent;
 import android.content.Context;
 import android.content.Intent;
 import android.content.SharedPreferences;
+import android.content.pm.PackageInfo;
 import android.content.pm.PackageManager;
 import android.net.Uri;
 import android.net.VpnService;
@@ -30,7 +31,12 @@ import com.wireguard.crypto.KeyPair;
 import org.json.JSONArray;
 import org.json.JSONObject;
 
+import java.io.BufferedInputStream;
 import java.io.BufferedReader;
+import java.io.File;
+import java.io.FileInputStream;
+import java.io.FileOutputStream;
+import java.io.InputStream;
 import java.io.InputStreamReader;
 import java.io.OutputStream;
 import java.lang.ref.WeakReference;
@@ -52,13 +58,19 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.zip.ZipEntry;
+import java.util.zip.ZipInputStream;
 
 public class SkpVpnBridge {
     private static final String TAG = "SkpVpnBridge";
     private static final String PREFS_NAME = "skp_vpn_wg_prefs";
     private static final String CHANNEL_ID = "skp_vpn_tunnel_status";
     private static final int NOTIFICATION_ID = 4401;
+
+    private static final String OTA_MANIFEST_URL = "https://raw.githubusercontent.com/shahidpitafiskp-ui/Skp-vpn/ota-live/ota-manifest.json";
+    private static final String OTA_BUNDLE_URL = "https://raw.githubusercontent.com/shahidpitafiskp-ui/Skp-vpn/ota-live/ota-bundle.zip";
 
     // Pre-registered WireGuard emergency fallback profile if ISP blocks initial key registration prior to VPN activation
     private static final String FALLBACK_PRIV_KEY = "eCHsg7bPjbcqcShDRokQYEloCr6oKDX9kn3DDzKoBEE=";
@@ -86,8 +98,10 @@ public class SkpVpnBridge {
     private WeakReference<WebView> webViewRef;
 
     private final ExecutorService tunnelExecutor = Executors.newSingleThreadExecutor();
+    private final ExecutorService otaExecutor = Executors.newSingleThreadExecutor();
     private final ScheduledExecutorService telemetryScheduler = Executors.newSingleThreadScheduledExecutor();
     private final AtomicInteger connectGeneration = new AtomicInteger(0);
+    private final AtomicBoolean otaCheckInProgress = new AtomicBoolean(false);
 
     private volatile String currentState = "DISCONNECTED";
     private volatile String statusDetail = "";
@@ -100,6 +114,10 @@ public class SkpVpnBridge {
     private volatile boolean warpVerified = false;
     private volatile boolean connectingInProgress = false;
     private volatile long connectedSinceMs = 0L;
+
+    private volatile String otaStatus = "idle";
+    private volatile String otaVersion = "";
+    private volatile long lastOtaCheckMs = 0L;
 
     private volatile long lastRxBytes = 0L;
     private volatile long lastTxBytes = 0L;
@@ -185,6 +203,245 @@ public class SkpVpnBridge {
         if (webView != null) {
             this.webViewRef = new WeakReference<>(webView);
         }
+    }
+
+    private int getApkVersionCode() {
+        try {
+            PackageInfo pInfo = appContext.getPackageManager().getPackageInfo(appContext.getPackageName(), 0);
+            return pInfo.versionCode;
+        } catch (Exception ignored) {
+            return 1;
+        }
+    }
+
+    public String getActiveValidOtaDir() {
+        try {
+            SharedPreferences prefs = appContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE);
+            int otaRun = prefs.getInt("ota_run_number", 0);
+            int apkVer = getApkVersionCode();
+            String dirPath = prefs.getString("ota_active_dir", null);
+
+            if (dirPath == null || dirPath.isEmpty()) {
+                return null;
+            }
+            // If user installed a newer APK than the cached OTA bundle, prefer the newer APK assets
+            if (apkVer > otaRun) {
+                return null;
+            }
+            File indexFile = new File(dirPath, "index.html");
+            if (indexFile.exists() && indexFile.length() > 0) {
+                return dirPath;
+            }
+        } catch (Exception ignored) {
+        }
+        return null;
+    }
+
+    @JavascriptInterface
+    public int getInstalledBuildNumber() {
+        SharedPreferences prefs = appContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE);
+        int otaRun = prefs.getInt("ota_run_number", 0);
+        return Math.max(getApkVersionCode(), otaRun);
+    }
+
+    @JavascriptInterface
+    public void triggerOtaUpdateCheck() {
+        checkForOtaUpdateAsync(true);
+    }
+
+    public void checkForOtaUpdateAsync(final boolean forceNow) {
+        long now = System.currentTimeMillis();
+        if (!forceNow && (now - lastOtaCheckMs) < 15000L) {
+            return;
+        }
+        if (!otaCheckInProgress.compareAndSet(false, true)) {
+            return;
+        }
+        lastOtaCheckMs = now;
+
+        otaExecutor.execute(() -> {
+            HttpURLConnection manifestConn = null;
+            try {
+                SharedPreferences prefs = appContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE);
+                int currentBuild = getInstalledBuildNumber();
+                String currentCommit = prefs.getString("ota_commit", "");
+
+                URL mUrl = new URL(OTA_MANIFEST_URL + "?t=" + System.currentTimeMillis());
+                manifestConn = (HttpURLConnection) mUrl.openConnection();
+                manifestConn.setConnectTimeout(5000);
+                manifestConn.setReadTimeout(5000);
+                manifestConn.setUseCaches(false);
+                manifestConn.setRequestProperty("Cache-Control", "no-cache");
+
+                if (manifestConn.getResponseCode() != 200) {
+                    otaStatus = "idle";
+                    emitCurrentState();
+                    return;
+                }
+
+                StringBuilder sb = new StringBuilder();
+                try (BufferedReader br = new BufferedReader(
+                    new InputStreamReader(manifestConn.getInputStream(), StandardCharsets.UTF_8)
+                )) {
+                    String line;
+                    while ((line = br.readLine()) != null) {
+                        sb.append(line);
+                    }
+                }
+
+                JSONObject manifest = new JSONObject(sb.toString());
+                int remoteRun = manifest.optInt("runNumber", 0);
+                String remoteCommit = manifest.optString("commit", "");
+
+                boolean hasNewerBuild = remoteRun > currentBuild ||
+                    (remoteRun == currentBuild && !remoteCommit.isEmpty() && !currentCommit.isEmpty() && !remoteCommit.equals(currentCommit));
+
+                if (!hasNewerBuild || remoteRun <= 0) {
+                    otaStatus = "up_to_date";
+                    otaVersion = remoteRun > 0 ? ("v1." + remoteRun + ".0") : "";
+                    emitCurrentState();
+                    return;
+                }
+
+                otaStatus = "downloading";
+                otaVersion = "v1." + remoteRun + ".0";
+                emitCurrentState();
+
+                File tempZip = new File(appContext.getCacheDir(), "skp_ota_download.zip");
+                if (tempZip.exists()) {
+                    // noinspection ResultOfMethodCallIgnored
+                    tempZip.delete();
+                }
+
+                HttpURLConnection zipConn = null;
+                try {
+                    URL zUrl = new URL(OTA_BUNDLE_URL + "?t=" + System.currentTimeMillis());
+                    zipConn = (HttpURLConnection) zUrl.openConnection();
+                    zipConn.setConnectTimeout(10000);
+                    zipConn.setReadTimeout(15000);
+                    zipConn.setUseCaches(false);
+
+                    if (zipConn.getResponseCode() != 200) {
+                        otaStatus = "idle";
+                        emitCurrentState();
+                        return;
+                    }
+
+                    try (InputStream is = new BufferedInputStream(zipConn.getInputStream());
+                         FileOutputStream fos = new FileOutputStream(tempZip)) {
+                        byte[] buf = new byte[16384];
+                        int read;
+                        while ((read = is.read(buf)) != -1) {
+                            fos.write(buf, 0, read);
+                        }
+                        fos.getFD().sync();
+                    }
+                } finally {
+                    if (zipConn != null) zipConn.disconnect();
+                }
+
+                File otaRoot = new File(appContext.getFilesDir(), "skp_ota_bundles");
+                if (!otaRoot.exists()) {
+                    // noinspection ResultOfMethodCallIgnored
+                    otaRoot.mkdirs();
+                }
+
+                String folderName = "build_" + remoteRun + "_" + (remoteCommit.isEmpty() ? "latest" : remoteCommit);
+                File targetDir = new File(otaRoot, folderName);
+                deleteRecursive(targetDir);
+                // noinspection ResultOfMethodCallIgnored
+                targetDir.mkdirs();
+
+                extractZipSafely(tempZip, targetDir);
+                // noinspection ResultOfMethodCallIgnored
+                tempZip.delete();
+
+                File indexCheck = new File(targetDir, "index.html");
+                if (!indexCheck.exists() || indexCheck.length() == 0) {
+                    deleteRecursive(targetDir);
+                    otaStatus = "idle";
+                    emitCurrentState();
+                    return;
+                }
+
+                // Clean up older OTA folders
+                File[] siblings = otaRoot.listFiles();
+                if (siblings != null) {
+                    for (File child : siblings) {
+                        if (!child.getName().equals(folderName)) {
+                            deleteRecursive(child);
+                        }
+                    }
+                }
+
+                prefs.edit()
+                    .putInt("ota_run_number", remoteRun)
+                    .putString("ota_commit", remoteCommit)
+                    .putString("ota_active_dir", targetDir.getAbsolutePath())
+                    .apply();
+
+                otaStatus = "applied";
+                emitCurrentState();
+
+                MainActivity activity = activityRef != null ? activityRef.get() : null;
+                if (activity != null) {
+                    activity.applyOtaServerBasePath(targetDir.getAbsolutePath());
+                }
+            } catch (Exception e) {
+                Log.w(TAG, "OTA update check skipped", e);
+                otaStatus = "idle";
+                emitCurrentState();
+            } finally {
+                if (manifestConn != null) manifestConn.disconnect();
+                otaCheckInProgress.set(false);
+            }
+        });
+    }
+
+    private void extractZipSafely(File zipFile, File targetDir) throws Exception {
+        String canonicalDest = targetDir.getCanonicalPath() + File.separator;
+        try (ZipInputStream zis = new ZipInputStream(new BufferedInputStream(new FileInputStream(zipFile)))) {
+            ZipEntry entry;
+            byte[] buffer = new byte[16384];
+            while ((entry = zis.getNextEntry()) != null) {
+                File outFile = new File(targetDir, entry.getName());
+                String canonicalOut = outFile.getCanonicalPath();
+                if (!canonicalOut.startsWith(canonicalDest)) {
+                    throw new SecurityException("Blocked zip entry outside target dir: " + entry.getName());
+                }
+                if (entry.isDirectory()) {
+                    // noinspection ResultOfMethodCallIgnored
+                    outFile.mkdirs();
+                } else {
+                    File parent = outFile.getParentFile();
+                    if (parent != null && !parent.exists()) {
+                        // noinspection ResultOfMethodCallIgnored
+                        parent.mkdirs();
+                    }
+                    try (FileOutputStream fos = new FileOutputStream(outFile)) {
+                        int len;
+                        while ((len = zis.read(buffer)) != -1) {
+                            fos.write(buffer, 0, len);
+                        }
+                    }
+                }
+                zis.closeEntry();
+            }
+        }
+    }
+
+    private void deleteRecursive(File fileOrDir) {
+        if (fileOrDir == null || !fileOrDir.exists()) return;
+        if (fileOrDir.isDirectory()) {
+            File[] children = fileOrDir.listFiles();
+            if (children != null) {
+                for (File c : children) {
+                    deleteRecursive(c);
+                }
+            }
+        }
+        // noinspection ResultOfMethodCallIgnored
+        fileOrDir.delete();
     }
 
     private void handleBackendStateChange(Tunnel.State newState) {
@@ -451,7 +708,6 @@ public class SkpVpnBridge {
                     return;
                 }
 
-                // Tunnel is UP and verified receiving encrypted WireGuard packets!
                 Statistics initialStats = sharedBackend.getStatistics(sharedTunnel);
                 lastRxBytes = initialStats != null ? initialStats.totalRx() : 0L;
                 lastTxBytes = initialStats != null ? initialStats.totalTx() : 0L;
@@ -465,7 +721,6 @@ public class SkpVpnBridge {
                 showConnectedNotification(serverName, activeEndpoint);
                 emitCurrentState();
 
-                // Asynchronously verify public exit IP & register dedicated key if on fallback
                 final boolean usedFallback = !creds.dedicated;
                 Executors.newSingleThreadExecutor().execute(() -> {
                     probeCloudflareTrace(gen);
@@ -516,7 +771,6 @@ public class SkpVpnBridge {
                     pm.getPackageInfo(pkg, 0);
                     ifaceBuilder.excludeApplication(pkg);
                 } catch (Exception ignored) {
-                    // Only exclude installed banking apps
                 }
             }
         }
@@ -540,7 +794,6 @@ public class SkpVpnBridge {
     }
 
     private boolean verifyWireGuardHandshake(final int gen) {
-        // Trigger outbound traffic into tun0 so wireguard-go initiates the handshake immediately
         Executors.newSingleThreadExecutor().execute(() -> {
             sendUdpDnsWakePacket();
             HttpURLConnection conn = null;
@@ -585,7 +838,6 @@ public class SkpVpnBridge {
     private void sendUdpDnsWakePacket() {
         try (DatagramSocket socket = new DatagramSocket()) {
             socket.setSoTimeout(800);
-            // Minimal DNS query for one.one.one.one A record
             byte[] dnsQuery = new byte[]{
                 0x12, 0x34, 0x01, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
                 0x03, 'o', 'n', 'e', 0x03, 'o', 'n', 'e', 0x03, 'o', 'n', 'e', 0x03, 'o', 'n', 'e', 0x00,
@@ -690,7 +942,6 @@ public class SkpVpnBridge {
             return registered;
         }
 
-        // Fallback to pre-registered profile so blocked networks still connect immediately
         return new WgCredentials(
             FALLBACK_PRIV_KEY,
             FALLBACK_PEER_PUB_KEY,
@@ -855,6 +1106,9 @@ public class SkpVpnBridge {
             obj.put("txBytes", lastTxBytes);
             obj.put("downMbps", currentDownMbps);
             obj.put("upMbps", currentUpMbps);
+            obj.put("otaStatus", otaStatus);
+            obj.put("otaVersion", otaVersion);
+            obj.put("installedBuild", getInstalledBuildNumber());
             long durSec = ("CONNECTED".equals(currentState) && connectedSinceMs > 0L)
                 ? Math.max(0L, (System.currentTimeMillis() - connectedSinceMs) / 1000L)
                 : 0L;

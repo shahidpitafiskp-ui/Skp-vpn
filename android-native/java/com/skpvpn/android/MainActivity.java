@@ -7,6 +7,7 @@ import android.os.Build;
 import android.os.Bundle;
 import android.webkit.WebView;
 import com.getcapacitor.BridgeActivity;
+import java.io.File;
 
 public class MainActivity extends BridgeActivity {
     public static final int VPN_PERMISSION_REQUEST_CODE = 7910;
@@ -24,10 +25,17 @@ public class MainActivity extends BridgeActivity {
             WebView webView = getBridge().getWebView();
             webView.addJavascriptInterface(vpnBridge, "SkpNativeVpn");
             vpnBridge.attachActivity(this, webView);
-            webView.reload();
+
+            String savedOtaDir = vpnBridge.getActiveValidOtaDir();
+            if (savedOtaDir != null) {
+                getBridge().setServerBasePath(savedOtaDir);
+            } else {
+                webView.reload();
+            }
         }
 
         requestPostNotificationsIfNeeded();
+        vpnBridge.checkForOtaUpdateAsync(false);
     }
 
     @Override
@@ -37,7 +45,25 @@ public class MainActivity extends BridgeActivity {
             WebView webView = (getBridge() != null) ? getBridge().getWebView() : null;
             vpnBridge.attachActivity(this, webView);
             vpnBridge.emitCurrentState();
+            vpnBridge.checkForOtaUpdateAsync(false);
         }
+    }
+
+    public void applyOtaServerBasePath(final String basePath) {
+        runOnUiThread(() -> {
+            try {
+                if (getBridge() != null && basePath != null) {
+                    File indexFile = new File(basePath, "index.html");
+                    if (indexFile.exists() && indexFile.length() > 0) {
+                        if (getBridge().getWebView() != null) {
+                            getBridge().getWebView().clearCache(true);
+                        }
+                        getBridge().setServerBasePath(basePath);
+                    }
+                }
+            } catch (Exception ignored) {
+            }
+        });
     }
 
     public void launchVpnPermissionDialog(Intent prepareIntent) {
