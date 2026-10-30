@@ -55,3 +55,20 @@ export interface ReconnectLogEntry {
   outcome: 'recovered' | 'failed';
   timestamp: string;
 }
+
+export interface NativeVpnEventPayload {
+  state: 'DISCONNECTED' | 'CONNECTING' | 'CONNECTED' | 'DISCONNECTING';
+  detail?: string;
+  error?: string;
+  serverId?: string;
+  serverName?: string;
+  endpoint?: string;
+  exitIp?: string;
+  colo?: string;
+  warpVerified?: boolean;
+  rxBytes?: number;
+  txBytes?: number;
+  downMbps?: number;
+  upMbps?: number;
+  durationSec?: number;
+}

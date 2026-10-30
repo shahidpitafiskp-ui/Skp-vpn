@@ -1,6 +1,10 @@
 import React, { useState } from 'react';
-import { X, BatteryCharging, Star, CheckCircle2 } from 'lucide-react';
+import { X, BatteryCharging, Star, CheckCircle2, ExternalLink } from 'lucide-react';
 import { Language } from '../types/vpn';
+import {
+  isNativeAndroidVpn,
+  openNativeBatterySettings,
+} from '../utils/nativeVpn';
 
 interface SupportBatteryModalProps {
   isOpen: boolean;
@@ -83,6 +87,21 @@ export const SupportBatteryModal: React.FC<SupportBatteryModalProps> = ({
                   : 'Select "Unrestricted" (Allow background activity)'}
               </li>
             </ol>
+
+            {isNativeAndroidVpn() && (
+              <button
+                type="button"
+                onClick={() => openNativeBatterySettings()}
+                className="w-full min-h-[44px] px-4 py-2.5 rounded-xl bg-[#0B5D32] hover:bg-[#147A42] text-white text-xs font-semibold flex items-center justify-center gap-2 transition-colors cursor-pointer"
+              >
+                <ExternalLink className="w-4 h-4 shrink-0" />
+                <span>
+                  {language === 'ur'
+                    ? 'اینڈرائیڈ بیٹری سیٹنگز کھولیں'
+                    : 'Allow Unrestricted Background VPN'}
+                </span>
+              </button>
+            )}
 
             <div className="flex items-center justify-between pt-1">
               <span className="text-xs text-slate-500">

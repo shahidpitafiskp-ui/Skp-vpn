@@ -8,6 +8,7 @@ import {
   Sliders,
   Check,
   RotateCw,
+  RefreshCw,
 } from 'lucide-react';
 import {
   ConnectionStatus,
@@ -34,6 +35,7 @@ interface DrawerMenuProps {
   onChangeLanguage: (lang: Language) => void;
   onOpenSpeedTest: () => void;
   onOpenBattery: () => void;
+  onOpenUpdates: () => void;
   onClose: () => void;
 }
 
@@ -54,6 +56,7 @@ export const DrawerMenu: React.FC<DrawerMenuProps> = ({
   onChangeLanguage,
   onOpenSpeedTest,
   onOpenBattery,
+  onOpenUpdates,
   onClose,
 }) => {
   if (!isOpen) return null;
@@ -144,6 +147,29 @@ export const DrawerMenu: React.FC<DrawerMenuProps> = ({
               <Gauge className="w-4 h-4 text-[#15803D]" />
               <span className={language === 'ur' ? 'font-urdu' : ''}>
                 {language === 'ur' ? 'فاسٹ انٹرنیٹ سپیڈ چیک' : 'Fast Internet Speed Check'}
+              </span>
+            </button>
+
+            <button
+              type="button"
+              onClick={() => {
+                onClose();
+                onOpenUpdates();
+              }}
+              className="w-full min-h-[48px] px-3.5 py-2.5 rounded-xl bg-slate-100 hover:bg-emerald-50 text-slate-900 hover:text-[#0B5D32] flex items-center justify-between gap-2.5 text-sm font-semibold transition-colors cursor-pointer"
+            >
+              <span className="flex items-center gap-2.5">
+                <RefreshCw className="w-4 h-4 text-[#15803D]" />
+                <span className={language === 'ur' ? 'font-urdu' : ''}>
+                  {language === 'ur'
+                    ? 'اپڈیٹس چیک کریں (Updates)'
+                    : 'Check for Updates'}
+                </span>
+              </span>
+              <span className="text-xs font-mono-tabular text-[#15803D]">
+                {import.meta.env.VITE_APP_BUILD_NUMBER
+                  ? `v1.${import.meta.env.VITE_APP_BUILD_NUMBER}.0`
+                  : 'Latest'}
               </span>
             </button>
 

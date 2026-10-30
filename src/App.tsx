@@ -13,10 +13,13 @@ import {
   Languages,
   RotateCw,
   WifiOff,
+  ShieldCheck,
+  AlertCircle,
 } from 'lucide-react';
 import {
   ConnectionStatus,
   Language,
+  NativeVpnEventPayload,
   ReconnectLogEntry,
   ServerLocation,
   SpeedTestMetrics,
@@ -28,6 +31,14 @@ import {
   SERVER_LOCATIONS,
   UI_STRINGS,
 } from './data/servers';
+import {
+  formatBytesCompact,
+  getNativeVpnStatus,
+  isNativeAndroidVpn,
+  nativeConnectVpn,
+  nativeDisconnectVpn,
+  subscribeNativeVpnEvents,
+} from './utils/nativeVpn';
 import { FlagIcon } from './components/FlagIcon';
 import { ConnectRingButton } from './components/ConnectRingButton';
 import { ServerListContent, ServerModal } from './components/ServerModal';
@@ -37,6 +48,7 @@ import {
   SpeedTestModal,
 } from './components/SpeedTestModal';
 import { DrawerMenu } from './components/DrawerMenu';
+import { UpdatesModal } from './components/UpdatesModal';
 
 const LAST_SERVER_STORAGE_KEY = 'skp_vpn_last_server_id';
 const AUTO_RECONNECT_STORAGE_KEY = 'skp_vpn_auto_reconnect';
@@ -79,9 +91,10 @@ function formatDuration(totalSeconds: number): string {
 
 export default function App() {
   const initialServer = loadInitialLastServer();
+  const nativeMode = isNativeAndroidVpn();
 
   const [status, setStatus] = useState<ConnectionStatus>(
-    ConnectionStatus.Connected
+    ConnectionStatus.Disconnected
   );
   const [selectedServer, setSelectedServer] =
     useState<ServerLocation>(initialServer);
@@ -90,6 +103,15 @@ export default function App() {
   const [autoReconnect, setAutoReconnect] = useState<boolean>(
     loadInitialAutoReconnect
   );
+
+  // Native Android WireGuard state
+  const [nativeDetail, setNativeDetail] = useState<string>('');
+  const [nativeError, setNativeError] = useState<string>('');
+  const [nativeExitIp, setNativeExitIp] = useState<string>('');
+  const [nativeColo, setNativeColo] = useState<string>('');
+  const [nativeEndpoint, setNativeEndpoint] = useState<string>('');
+  const [nativeRxBytes, setNativeRxBytes] = useState<number>(0);
+  const [nativeTxBytes, setNativeTxBytes] = useState<number>(0);
 
   // Auto-reconnect runtime state
   const [reconnectAttempt, setReconnectAttempt] = useState<number>(0);
@@ -118,11 +140,12 @@ export default function App() {
   const [serverModalOpen, setServerModalOpen] = useState<boolean>(false);
   const [supportModalOpen, setSupportModalOpen] = useState<boolean>(false);
   const [speedModalOpen, setSpeedModalOpen] = useState<boolean>(false);
+  const [updatesModalOpen, setUpdatesModalOpen] = useState<boolean>(false);
 
   // Live session timer & throughput telemetry
-  const [sessionSeconds, setSessionSeconds] = useState<number>(854);
-  const [downSpeedMbps, setDownSpeedMbps] = useState<number>(56.4);
-  const [upSpeedMbps, setUpSpeedMbps] = useState<number>(23.8);
+  const [sessionSeconds, setSessionSeconds] = useState<number>(0);
+  const [downSpeedMbps, setDownSpeedMbps] = useState<number>(0);
+  const [upSpeedMbps, setUpSpeedMbps] = useState<number>(0);
   const [lastSpeedTest, setLastSpeedTest] = useState<SpeedTestMetrics | null>(
     null
   );
@@ -132,6 +155,9 @@ export default function App() {
   const reconnectHandshakeRef = useRef<number | null>(null);
   const recoveryMessageTimerRef = useRef<number | null>(null);
 
+  const isBankingBypassed =
+    splitApps.find((app) => app.id === 'banking')?.enabled === false;
+
   const saveLastUsedServer = useCallback((srv: ServerLocation) => {
     setLastUsedServer(srv);
     try {
@@ -140,6 +166,73 @@ export default function App() {
       // Ignore storage errors
     }
   }, []);
+
+  const applyNativePayload = useCallback(
+    (payload: NativeVpnEventPayload) => {
+      setNativeDetail(payload.detail ?? '');
+      if (payload.error) {
+        setNativeError(payload.error);
+      } else if (payload.state === 'CONNECTED' || payload.state === 'CONNECTING') {
+        setNativeError('');
+      }
+
+      if (payload.exitIp !== undefined) setNativeExitIp(payload.exitIp);
+      if (payload.colo !== undefined) setNativeColo(payload.colo);
+      if (payload.endpoint !== undefined) setNativeEndpoint(payload.endpoint);
+      if (typeof payload.rxBytes === 'number') setNativeRxBytes(payload.rxBytes);
+      if (typeof payload.txBytes === 'number') setNativeTxBytes(payload.txBytes);
+
+      if (payload.serverId) {
+        const matched = SERVER_LOCATIONS.find((s) => s.id === payload.serverId);
+        if (matched) {
+          setSelectedServer(matched);
+          if (payload.state === 'CONNECTED') {
+            saveLastUsedServer(matched);
+          }
+        }
+      }
+
+      if (payload.state === 'CONNECTED') {
+        setStatus(ConnectionStatus.Connected);
+        if (typeof payload.durationSec === 'number') {
+          setSessionSeconds(payload.durationSec);
+        }
+        if (typeof payload.downMbps === 'number') {
+          setDownSpeedMbps(payload.downMbps);
+        }
+        if (typeof payload.upMbps === 'number') {
+          setUpSpeedMbps(payload.upMbps);
+        }
+      } else if (payload.state === 'CONNECTING') {
+        setStatus(ConnectionStatus.Connecting);
+      } else if (payload.state === 'DISCONNECTING') {
+        setStatus(ConnectionStatus.Disconnecting);
+      } else if (payload.state === 'DISCONNECTED') {
+        setStatus(ConnectionStatus.Disconnected);
+        setDownSpeedMbps(0);
+        setUpSpeedMbps(0);
+        setSessionSeconds(0);
+      }
+    },
+    [saveLastUsedServer]
+  );
+
+  useEffect(() => {
+    if (!nativeMode) return;
+
+    const initial = getNativeVpnStatus();
+    if (initial) {
+      applyNativePayload(initial);
+    }
+
+    const unsubscribe = subscribeNativeVpnEvents((payload) => {
+      applyNativePayload(payload);
+    });
+
+    return () => {
+      unsubscribe();
+    };
+  }, [nativeMode, applyNativePayload]);
 
   const handleToggleAutoReconnect = useCallback(() => {
     setAutoReconnect((prev) => {
@@ -228,6 +321,19 @@ export default function App() {
           setReconnectCountdown(0);
           setReconnectHandshakeActive(true);
 
+          if (nativeMode) {
+            nativeConnectVpn(
+              targetServer.id,
+              targetServer.nameEn,
+              protocol,
+              isBankingBypassed
+            );
+            setReconnectHandshakeActive(false);
+            setReconnectAttempt(0);
+            setDropReason(null);
+            return;
+          }
+
           reconnectHandshakeRef.current = window.setTimeout(() => {
             const browserOnline =
               typeof navigator !== 'undefined' ? navigator.onLine : true;
@@ -278,7 +384,13 @@ export default function App() {
         }
       }, 1000);
     },
-    [clearAllTimers, saveLastUsedServer]
+    [
+      clearAllTimers,
+      isBankingBypassed,
+      nativeMode,
+      protocol,
+      saveLastUsedServer,
+    ]
   );
 
   const handleConnectionDropDetected = useCallback(
@@ -288,6 +400,10 @@ export default function App() {
       setDownSpeedMbps(0);
       setUpSpeedMbps(0);
 
+      if (nativeMode) {
+        nativeDisconnectVpn();
+      }
+
       if (autoReconnect) {
         executeReconnectAttempt(1, lastUsedServer, reason);
       } else {
@@ -295,7 +411,13 @@ export default function App() {
         setSessionSeconds(0);
       }
     },
-    [autoReconnect, clearAllTimers, executeReconnectAttempt, lastUsedServer]
+    [
+      autoReconnect,
+      clearAllTimers,
+      executeReconnectAttempt,
+      lastUsedServer,
+      nativeMode,
+    ]
   );
 
   const handleRetryReconnectNow = useCallback(() => {
@@ -304,6 +426,19 @@ export default function App() {
     const currentAttempt = Math.max(1, reconnectAttempt);
     setReconnectCountdown(0);
     setReconnectHandshakeActive(true);
+
+    if (nativeMode) {
+      nativeConnectVpn(
+        lastUsedServer.id,
+        lastUsedServer.nameEn,
+        protocol,
+        isBankingBypassed
+      );
+      setReconnectHandshakeActive(false);
+      setReconnectAttempt(0);
+      setDropReason(null);
+      return;
+    }
 
     reconnectHandshakeRef.current = window.setTimeout(() => {
       const browserOnline =
@@ -352,7 +487,10 @@ export default function App() {
     clearAllTimers,
     dropReason,
     executeReconnectAttempt,
+    isBankingBypassed,
     lastUsedServer,
+    nativeMode,
+    protocol,
     reconnectAttempt,
     saveLastUsedServer,
     status,
@@ -380,28 +518,10 @@ export default function App() {
     };
   }, [status, handleConnectionDropDetected, handleRetryReconnectNow]);
 
+  // Web preview telemetry timer (native Android pushes real WireGuard telemetry instead)
   useEffect(() => {
-    if (status !== ConnectionStatus.Connected) return;
+    if (nativeMode) return;
 
-    const probeInterval = window.setInterval(async () => {
-      if (typeof navigator !== 'undefined' && !navigator.onLine) {
-        handleConnectionDropDetected('network_offline');
-        return;
-      }
-      try {
-        await fetch(window.location.origin, {
-          method: 'HEAD',
-          cache: 'no-store',
-        });
-      } catch {
-        handleConnectionDropDetected('tunnel_drop');
-      }
-    }, 20000);
-
-    return () => window.clearInterval(probeInterval);
-  }, [status, handleConnectionDropDetected]);
-
-  useEffect(() => {
     if (status !== ConnectionStatus.Connected) {
       setDownSpeedMbps(0);
       setUpSpeedMbps(0);
@@ -425,11 +545,36 @@ export default function App() {
     }, 1000);
 
     return () => window.clearInterval(interval);
-  }, [status, selectedServer]);
+  }, [nativeMode, status, selectedServer]);
 
   const handleToggleConnection = useCallback(() => {
     clearAllTimers();
     setRecoveryBannerMessage(null);
+    setNativeError('');
+
+    if (nativeMode) {
+      if (
+        status === ConnectionStatus.Connected ||
+        status === ConnectionStatus.Connecting ||
+        status === ConnectionStatus.Reconnecting
+      ) {
+        setDropReason(null);
+        setReconnectAttempt(0);
+        setReconnectCountdown(0);
+        setReconnectHandshakeActive(false);
+        nativeDisconnectVpn();
+      } else {
+        setDropReason(null);
+        saveLastUsedServer(selectedServer);
+        nativeConnectVpn(
+          selectedServer.id,
+          selectedServer.nameEn,
+          protocol,
+          isBankingBypassed
+        );
+      }
+      return;
+    }
 
     if (status === ConnectionStatus.Connected) {
       setDropReason(null);
@@ -458,22 +603,37 @@ export default function App() {
         setStatus(ConnectionStatus.Connected);
       }, 1150);
     }
-  }, [clearAllTimers, saveLastUsedServer, selectedServer, status]);
+  }, [
+    clearAllTimers,
+    isBankingBypassed,
+    nativeMode,
+    protocol,
+    saveLastUsedServer,
+    selectedServer,
+    status,
+  ]);
 
   const handleSelectServer = useCallback(
     (srv: ServerLocation) => {
       setSelectedServer(srv);
       setDropReason(null);
       setRecoveryBannerMessage(null);
+      setNativeError('');
       clearAllTimers();
+      saveLastUsedServer(srv);
+
+      if (nativeMode) {
+        nativeConnectVpn(srv.id, srv.nameEn, protocol, isBankingBypassed);
+        return;
+      }
+
       setStatus(ConnectionStatus.Connecting);
       transitionTimerRef.current = window.setTimeout(() => {
         setSessionSeconds(0);
-        saveLastUsedServer(srv);
         setStatus(ConnectionStatus.Connected);
       }, 950);
     },
-    [clearAllTimers, saveLastUsedServer]
+    [clearAllTimers, isBankingBypassed, nativeMode, protocol, saveLastUsedServer]
   );
 
   const handleToggleSplitApp = useCallback((id: string) => {
@@ -492,12 +652,19 @@ export default function App() {
       : status === ConnectionStatus.Reconnecting
       ? `${t.reconnecting} (${reconnectAttempt}/${MAX_RECONNECT_ATTEMPTS})`
       : status === ConnectionStatus.Connecting
-      ? t.connecting
+      ? nativeMode && nativeDetail
+        ? nativeDetail
+        : t.connecting
       : status === ConnectionStatus.Disconnecting
       ? t.disconnecting
       : dropReason
       ? t.connectionDropped
       : t.ready;
+
+  const displayedVirtualIp =
+    status === ConnectionStatus.Connected
+      ? nativeExitIp || selectedServer.virtualIp
+      : 'Unmasked (Disconnected)';
 
   return (
     <div
@@ -538,6 +705,13 @@ export default function App() {
             className="hover:text-white hover:underline underline-offset-4 transition-colors whitespace-nowrap shrink-0 cursor-pointer"
           >
             Keep-Alive Guide
+          </button>
+          <button
+            type="button"
+            onClick={() => setUpdatesModalOpen(true)}
+            className="hover:text-white hover:underline underline-offset-4 transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+          >
+            Updates
           </button>
         </nav>
 
@@ -656,7 +830,7 @@ export default function App() {
 
                 {/* Connection Status Text */}
                 <div
-                  className={`mt-4 mb-1 text-[17px] font-medium text-center font-mono-tabular ${
+                  className={`mt-4 mb-1 text-[16px] font-medium text-center font-mono-tabular px-2 ${
                     status === ConnectionStatus.Connected
                       ? 'text-[#15803D]'
                       : status === ConnectionStatus.Reconnecting
@@ -664,7 +838,7 @@ export default function App() {
                       : status === ConnectionStatus.Connecting ||
                         status === ConnectionStatus.Disconnecting
                       ? 'text-[#F48A24]'
-                      : dropReason
+                      : dropReason || nativeError
                       ? 'text-rose-600'
                       : 'text-slate-500'
                   } ${language === 'ur' ? 'font-urdu' : ''}`}
@@ -684,13 +858,23 @@ export default function App() {
                 {/* Quiet Unboxed Live Session or Reconnect Telemetry */}
                 <div className="mt-2 min-h-[24px] flex flex-wrap items-center justify-center gap-2 text-xs text-slate-500 font-mono-tabular text-center">
                   {status === ConnectionStatus.Connected ? (
-                    <>
-                      <span>{formatDuration(sessionSeconds)}</span>
-                      <span aria-hidden="true">·</span>
-                      <span>↓ {downSpeedMbps.toFixed(1)} Mbps</span>
-                      <span aria-hidden="true">·</span>
-                      <span>↑ {upSpeedMbps.toFixed(1)} Mbps</span>
-                    </>
+                    nativeMode ? (
+                      <>
+                        <span>{formatDuration(sessionSeconds)}</span>
+                        <span aria-hidden="true">·</span>
+                        <span>↓ {formatBytesCompact(nativeRxBytes)}</span>
+                        <span aria-hidden="true">·</span>
+                        <span>↑ {formatBytesCompact(nativeTxBytes)}</span>
+                      </>
+                    ) : (
+                      <>
+                        <span>{formatDuration(sessionSeconds)}</span>
+                        <span aria-hidden="true">·</span>
+                        <span>↓ {downSpeedMbps.toFixed(1)} Mbps</span>
+                        <span aria-hidden="true">·</span>
+                        <span>↑ {upSpeedMbps.toFixed(1)} Mbps</span>
+                      </>
+                    )
                   ) : status === ConnectionStatus.Reconnecting ? (
                     <>
                       <span className="font-sans text-[#D9720D] font-medium">
@@ -721,10 +905,33 @@ export default function App() {
                     </>
                   ) : (
                     <span className="font-sans text-slate-400">
-                      {protocol} · {selectedServer.basePingMs} ms
+                      {nativeMode ? 'WireGuard System VPN' : protocol} ·{' '}
+                      {selectedServer.basePingMs} ms
                     </span>
                   )}
                 </div>
+
+                {/* Real Android System WireGuard Tunnel Confirmation Line */}
+                {status === ConnectionStatus.Connected && (
+                  <div className="mt-1.5 flex items-center justify-center gap-1.5 text-xs text-emerald-700 font-medium text-center">
+                    <ShieldCheck className="w-3.5 h-3.5 shrink-0 text-[#15803D]" />
+                    <span className="font-mono-tabular">
+                      {nativeMode
+                        ? `System VPN Active${
+                            nativeExitIp ? ` · IP ${nativeExitIp}` : ''
+                          }${nativeColo ? ` (${nativeColo})` : ''}`
+                        : `Protected IP · ${displayedVirtualIp}`}
+                    </span>
+                  </div>
+                )}
+
+                {/* Native Android Error / Permission Prompt Notice */}
+                {nativeError && status === ConnectionStatus.Disconnected && (
+                  <div className="mt-2.5 w-full rounded-lg bg-rose-50 border border-rose-200 px-3 py-2 text-xs text-rose-700 flex items-start gap-2 text-left">
+                    <AlertCircle className="w-4 h-4 shrink-0 mt-0.5 text-rose-600" />
+                    <span>{nativeError}</span>
+                  </div>
+                )}
 
                 {/* Recovery Confirmation Line */}
                 {recoveryBannerMessage &&
@@ -775,17 +982,22 @@ export default function App() {
                         ? lastUsedServer.nameUr
                         : lastUsedServer.nameEn}
                     </span>
-                    {killSwitch && (
+                    {nativeEndpoint && status === ConnectionStatus.Connected ? (
+                      <>
+                        <span aria-hidden="true"> · </span>
+                        <span className="font-mono-tabular">{nativeEndpoint}</span>
+                      </>
+                    ) : killSwitch ? (
                       <>
                         <span aria-hidden="true"> · </span>
                         <span>Kill-Switch On</span>
                       </>
-                    )}
+                    ) : null}
                   </div>
                 </div>
 
                 <div className="flex items-center gap-2 shrink-0">
-                  {status === ConnectionStatus.Connected && (
+                  {status === ConnectionStatus.Connected && !nativeMode && (
                     <button
                       type="button"
                       onClick={() =>
@@ -835,7 +1047,7 @@ export default function App() {
                     {protocol} · Virtual IP{' '}
                     <span className="font-mono-tabular text-slate-700 font-medium">
                       {status === ConnectionStatus.Connected
-                        ? selectedServer.virtualIp
+                        ? displayedVirtualIp
                         : status === ConnectionStatus.Reconnecting
                         ? `Reconnecting to ${lastUsedServer.virtualIp}...`
                         : 'Unmasked (Disconnected)'}
@@ -1003,6 +1215,7 @@ export default function App() {
         onChangeLanguage={setLanguage}
         onOpenSpeedTest={() => setSpeedModalOpen(true)}
         onOpenBattery={() => setSupportModalOpen(true)}
+        onOpenUpdates={() => setUpdatesModalOpen(true)}
         onClose={() => setDrawerOpen(false)}
       />
 
@@ -1029,6 +1242,12 @@ export default function App() {
         language={language}
         onComplete={setLastSpeedTest}
         onClose={() => setSpeedModalOpen(false)}
+      />
+
+      <UpdatesModal
+        isOpen={updatesModalOpen}
+        language={language}
+        onClose={() => setUpdatesModalOpen(false)}
       />
     </div>
   );

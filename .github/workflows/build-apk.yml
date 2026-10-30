@@ -85,6 +85,8 @@ jobs:
           set -euo pipefail
           rm -rf public/assets/aistudio || true
           npm install --legacy-peer-deps
+          VITE_APP_BUILD_NUMBER="${GITHUB_RUN_NUMBER}" \
+          VITE_APP_COMMIT_SHA="${GITHUB_SHA:0:7}" \
           npm run build
 
           npm install --save-dev --legacy-peer-deps \
@@ -97,6 +99,41 @@ jobs:
           fi
 
           npx cap sync android
+
+          # Inject real Android WireGuard VpnService bridge and manifest
+          cp android-native/AndroidManifest.xml android/app/src/main/AndroidManifest.xml
+          find android/app/src/main/java -name "MainActivity.java" -delete || true
+          mkdir -p android/app/src/main/java/com/skpvpn/android
+          cp android-native/java/com/skpvpn/android/MainActivity.java android/app/src/main/java/com/skpvpn/android/MainActivity.java
+          cp android-native/java/com/skpvpn/android/SkpVpnBridge.java android/app/src/main/java/com/skpvpn/android/SkpVpnBridge.java
+
+          # Ensure minSdkVersion >= 24, dynamic versionCode/versionName, emerald icon background, & WireGuard AAR
+          node -e '
+            const fs = require("fs");
+            const runNum = parseInt(process.env.GITHUB_RUN_NUMBER || "1", 10) || 1;
+
+            const varsPath = "android/variables.gradle";
+            let vars = fs.readFileSync(varsPath, "utf8");
+            vars = vars.replace(/minSdkVersion\s*=\s*\d+/, "minSdkVersion = 24");
+            fs.writeFileSync(varsPath, vars);
+
+            const bgXmlPath = "android/app/src/main/res/values/ic_launcher_background.xml";
+            if (fs.existsSync(bgXmlPath)) {
+              let bg = fs.readFileSync(bgXmlPath, "utf8");
+              bg = bg.replace(/#[0-9A-Fa-f]{6}/, "#147A42");
+              fs.writeFileSync(bgXmlPath, bg);
+            }
+
+            const appGradlePath = "android/app/build.gradle";
+            let appGradle = fs.readFileSync(appGradlePath, "utf8");
+            appGradle = appGradle.replace(/versionCode\s+\d+/, "versionCode " + runNum);
+            appGradle = appGradle.replace(/versionName\s+"[^"]*"/, `versionName "1.${runNum}.0"`);
+            if (!appGradle.includes("com.wireguard.android:tunnel")) {
+              appGradle += `\n// SKP_NATIVE_WIREGUARD_VPN\nandroid {\n    compileOptions {\n        sourceCompatibility JavaVersion.VERSION_17\n        targetCompatibility JavaVersion.VERSION_17\n        coreLibraryDesugaringEnabled true\n    }\n    packagingOptions {\n        jniLibs {\n            useLegacyPackaging true\n        }\n    }\n}\n\ndependencies {\n    coreLibraryDesugaring "com.android.tools:desugar_jdk_libs:2.0.4"\n    implementation "com.wireguard.android:tunnel:1.0.20260102"\n}\n`;
+            }
+            fs.writeFileSync(appGradlePath, appGradle);
+          '
+
           printf "sdk.dir=%s\n" "${ANDROID_HOME}" > android/local.properties
 
       - name: Create temporary debug keystore
