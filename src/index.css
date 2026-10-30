@@ -175,6 +175,54 @@ html.dark.theme-3d .orb-3d-core {
   }
 }
 
+@keyframes handshake-ripple {
+  0% {
+    transform: scale(0.95);
+    opacity: 0.48;
+  }
+  70% {
+    transform: scale(1.13);
+    opacity: 0.12;
+  }
+  100% {
+    transform: scale(1.17);
+    opacity: 0;
+  }
+}
+
+@keyframes handshake-breathe {
+  0%,
+  100% {
+    transform: scale(1);
+    opacity: 1;
+  }
+  50% {
+    transform: scale(1.028);
+    opacity: 0.92;
+  }
+}
+
 .animate-spin-slow {
   animation: spin-slow 1.6s linear infinite;
+}
+
+.animate-handshake-ripple {
+  animation: handshake-ripple 2.1s cubic-bezier(0.16, 1, 0.3, 1) infinite;
+}
+
+.animate-handshake-ripple-delayed {
+  animation: handshake-ripple 2.1s cubic-bezier(0.16, 1, 0.3, 1) 1.05s infinite;
+}
+
+.animate-handshake-breathe {
+  animation: handshake-breathe 1.8s ease-in-out infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .animate-spin-slow,
+  .animate-handshake-ripple,
+  .animate-handshake-ripple-delayed,
+  .animate-handshake-breathe {
+    animation: none;
+  }
 }

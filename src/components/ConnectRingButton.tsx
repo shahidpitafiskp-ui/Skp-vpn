@@ -19,11 +19,11 @@ export const ConnectRingButton: React.FC<ConnectRingButtonProps> = ({
   darkMode = false,
 }) => {
   const isConnected = status === ConnectionStatus.Connected;
+  const isConnecting = status === ConnectionStatus.Connecting;
   const isReconnecting = status === ConnectionStatus.Reconnecting;
+  const isHandshaking = isConnecting || isReconnecting;
   const isTransitioning =
-    status === ConnectionStatus.Connecting ||
-    status === ConnectionStatus.Disconnecting ||
-    isReconnecting;
+    isHandshaking || status === ConnectionStatus.Disconnecting;
 
   const buttonText = isTransitioning
     ? cancelLabel
@@ -69,17 +69,38 @@ export const ConnectRingButton: React.FC<ConnectRingButtonProps> = ({
     ? '#6EE7B7'
     : '#15803D';
 
+  const rippleToneClasses = isReconnecting
+    ? 'border-amber-500/45 bg-amber-500/10 dark:border-amber-400/40 dark:bg-amber-400/10'
+    : 'border-emerald-600/40 bg-emerald-500/10 dark:border-emerald-400/40 dark:bg-emerald-400/10';
+
   return (
     <div className="relative flex items-center justify-center my-3 select-none">
+      {/* Subtle Concentric Handshake Pulse Rings (Connecting / Reconnecting only) */}
+      {isHandshaking && (
+        <>
+          <span
+            aria-hidden="true"
+            className={`pointer-events-none absolute w-[208px] h-[208px] rounded-full border-2 ${rippleToneClasses} animate-handshake-ripple`}
+          />
+          <span
+            aria-hidden="true"
+            className={`pointer-events-none absolute w-[208px] h-[208px] rounded-full border ${rippleToneClasses} animate-handshake-ripple-delayed`}
+          />
+        </>
+      )}
+
       <button
         type="button"
         onClick={onToggle}
         aria-label={buttonText}
+        aria-busy={isHandshaking}
         className="group relative w-[208px] h-[208px] rounded-full flex items-center justify-center focus:outline-none focus-visible:ring-4 focus-visible:ring-[#16A34A]/40 active:translate-y-[3px] active:scale-[0.97] transition-transform duration-150 cursor-pointer"
       >
         <svg
           viewBox="0 0 220 220"
-          className="absolute inset-0 w-full h-full pointer-events-none"
+          className={`absolute inset-0 w-full h-full pointer-events-none ${
+            isHandshaking ? 'animate-handshake-breathe' : ''
+          }`}
         >
           <defs>
             <linearGradient
@@ -158,7 +179,11 @@ export const ConnectRingButton: React.FC<ConnectRingButtonProps> = ({
           )}
         </svg>
 
-        <span className="orb-3d-core relative z-10 w-[154px] h-[154px] rounded-full bg-white dark:bg-[#132A1F] shadow-xs flex flex-col items-center justify-center px-3 transition-transform duration-150 group-hover:scale-[1.015]">
+        <span
+          className={`orb-3d-core relative z-10 w-[154px] h-[154px] rounded-full bg-white dark:bg-[#132A1F] shadow-xs flex flex-col items-center justify-center px-3 transition-transform duration-150 group-hover:scale-[1.015] ${
+            isHandshaking ? 'animate-handshake-breathe' : ''
+          }`}
+        >
           <span
             className={`font-display-3d-emerald text-[19px] font-extrabold tracking-wider whitespace-nowrap ${
               isConnected
