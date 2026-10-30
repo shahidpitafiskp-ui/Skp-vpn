@@ -14,6 +14,8 @@ interface SkpNativeVpnInterface {
   openBatterySettings: () => void;
   openExternalUrl?: (url: string) => void;
   getInstalledBuildNumber?: () => number;
+  getConfiguredRepo?: () => string;
+  syncUpdateRepo?: (repoSlug: string) => void;
   triggerOtaUpdateCheck?: () => void;
   downloadAndInstallApk?: (apkUrl: string) => void;
   installDownloadedApkIfReady?: () => void;
@@ -64,6 +66,31 @@ export function getNativeVpnStatus(): NativeVpnEventPayload | null {
   }
 }
 
+export function getNativeConfiguredRepo(): string | null {
+  if (!isNativeAndroidVpn() || !window.SkpNativeVpn?.getConfiguredRepo) {
+    return null;
+  }
+  try {
+    const repo = window.SkpNativeVpn.getConfiguredRepo();
+    return typeof repo === 'string' && repo.includes('/') ? repo.trim() : null;
+  } catch {
+    return null;
+  }
+}
+
+export function syncNativeUpdateRepo(repoSlug: string): void {
+  if (!isNativeAndroidVpn() || !window.SkpNativeVpn?.syncUpdateRepo) {
+    return;
+  }
+  try {
+    if (repoSlug && repoSlug.includes('/')) {
+      window.SkpNativeVpn.syncUpdateRepo(repoSlug.trim());
+    }
+  } catch {
+    // Ignore bridge sync errors on older APKs
+  }
+}
+
 export function getNativeInstalledBuildNumber(): number | null {
   if (!isNativeAndroidVpn() || !window.SkpNativeVpn?.getInstalledBuildNumber) {
     return null;
@@ -76,11 +103,14 @@ export function getNativeInstalledBuildNumber(): number | null {
   }
 }
 
-export function triggerNativeOtaUpdateCheck(): boolean {
+export function triggerNativeOtaUpdateCheck(repoSlug?: string): boolean {
   if (!isNativeAndroidVpn() || !window.SkpNativeVpn?.triggerOtaUpdateCheck) {
     return false;
   }
   try {
+    if (repoSlug) {
+      syncNativeUpdateRepo(repoSlug);
+    }
     window.SkpNativeVpn.triggerOtaUpdateCheck();
     return true;
   } catch {

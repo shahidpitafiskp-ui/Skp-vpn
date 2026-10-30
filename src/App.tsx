@@ -44,8 +44,10 @@ import {
   nativeDisconnectVpn,
   nativeDownloadAndInstallApk,
   subscribeNativeVpnEvents,
+  syncNativeUpdateRepo,
   triggerNativeOtaUpdateCheck,
 } from './utils/nativeVpn';
+import { GITHUB_REPO, getRepoUrls } from './utils/updateConfig';
 import { FlagIcon } from './components/FlagIcon';
 import { ConnectRingButton } from './components/ConnectRingButton';
 import { ServerListContent, ServerModal } from './components/ServerModal';
@@ -279,6 +281,8 @@ export default function App() {
   const [otaVersion, setOtaVersion] = useState<string>('');
   const [otaProgress, setOtaProgress] = useState<number>(0);
   const [otaError, setOtaError] = useState<string>('');
+  const [otaErrorCode, setOtaErrorCode] = useState<string>('');
+  const [otaGithubRepo, setOtaGithubRepo] = useState<string>('');
 
   // Auto-reconnect runtime state
   const [reconnectAttempt, setReconnectAttempt] = useState<number>(0);
@@ -486,6 +490,10 @@ export default function App() {
       if (typeof payload.otaProgress === 'number')
         setOtaProgress(payload.otaProgress);
       if (payload.otaError !== undefined) setOtaError(payload.otaError);
+      if (payload.otaErrorCode !== undefined)
+        setOtaErrorCode(payload.otaErrorCode);
+      if (payload.githubRepo !== undefined)
+        setOtaGithubRepo(payload.githubRepo);
 
       if (payload.serverId) {
         const matched = SERVER_LOCATIONS.find((s) => s.id === payload.serverId);
@@ -539,6 +547,8 @@ export default function App() {
 
   useEffect(() => {
     if (!nativeMode) return;
+
+    syncNativeUpdateRepo(GITHUB_REPO);
 
     const initial = getNativeVpnStatus();
     if (initial) {
@@ -1091,14 +1101,13 @@ export default function App() {
   const handleMenuQuickUpdate = useCallback(() => {
     setUpdatesModalOpen(true);
     if (nativeMode) {
-      const triggered = triggerNativeOtaUpdateCheck();
+      const effectiveRepo = otaGithubRepo || GITHUB_REPO;
+      const triggered = triggerNativeOtaUpdateCheck(effectiveRepo);
       if (!triggered && hasNativeInAppApkInstaller()) {
-        nativeDownloadAndInstallApk(
-          'https://github.com/shahidpitafiskp-ui/Skp-vpn/releases/latest/download/app-debug.apk'
-        );
+        nativeDownloadAndInstallApk(getRepoUrls(effectiveRepo).directApkUrl);
       }
     }
-  }, [nativeMode]);
+  }, [nativeMode, otaGithubRepo]);
 
   const t = UI_STRINGS[language];
 
@@ -1943,6 +1952,8 @@ export default function App() {
         otaStatus={otaStatus}
         otaProgress={otaProgress}
         otaError={otaError}
+        otaErrorCode={otaErrorCode}
+        otaGithubRepo={otaGithubRepo}
         otaVersion={otaVersion}
         onClose={() => setUpdatesModalOpen(false)}
       />

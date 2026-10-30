@@ -28,6 +28,7 @@ jobs:
           rm -rf public/assets/aistudio || true
           npm install --legacy-peer-deps
           VITE_NATIVE_ANDROID="true" \
+          VITE_GITHUB_REPO="${GITHUB_REPOSITORY}" \
           VITE_APP_BUILD_NUMBER="${GITHUB_RUN_NUMBER}" \
           VITE_APP_COMMIT_SHA="${GITHUB_SHA:0:7}" \
           npm run build
@@ -55,6 +56,7 @@ jobs:
           node -e '
             const fs = require("fs");
             const manifest = {
+              repo: process.env.GITHUB_REPOSITORY || "",
               runNumber: parseInt(process.env.GITHUB_RUN_NUMBER || "1", 10) || 1,
               commit: (process.env.GITHUB_SHA || "").slice(0, 7),
               fullCommit: process.env.GITHUB_SHA || "",
@@ -146,12 +148,15 @@ jobs:
           node-version: '22'
 
       - name: Build Web App and Generate Android Project
+        env:
+          SKP_UPDATE_READ_TOKEN: ${{ secrets.SKP_UPDATE_READ_TOKEN }}
         shell: bash
         run: |
           set -euo pipefail
           rm -rf public/assets/aistudio || true
           npm install --legacy-peer-deps
           VITE_NATIVE_ANDROID="true" \
+          VITE_GITHUB_REPO="${GITHUB_REPOSITORY}" \
           VITE_APP_BUILD_NUMBER="${GITHUB_RUN_NUMBER}" \
           VITE_APP_COMMIT_SHA="${GITHUB_SHA:0:7}" \
           npm run build
@@ -166,6 +171,25 @@ jobs:
             );
           });
           EOF
+
+          OTA_REL_DIR="${RUNNER_TEMP}/skp-vpn-ota-release"
+          rm -rf "$OTA_REL_DIR"
+          mkdir -p "$OTA_REL_DIR"
+          (
+            cd dist
+            zip -qr "${OTA_REL_DIR}/ota-bundle.zip" .
+          )
+          node -e '
+            const fs = require("fs");
+            const manifest = {
+              repo: process.env.GITHUB_REPOSITORY || "",
+              runNumber: parseInt(process.env.GITHUB_RUN_NUMBER || "1", 10) || 1,
+              commit: (process.env.GITHUB_SHA || "").slice(0, 7),
+              fullCommit: process.env.GITHUB_SHA || "",
+              updatedAt: new Date().toISOString()
+            };
+            fs.writeFileSync(process.argv[1], JSON.stringify(manifest, null, 2));
+          ' "${OTA_REL_DIR}/ota-manifest.json"
 
           npm install --save-dev --legacy-peer-deps \
             @capacitor/core@6.2.0 \
@@ -187,10 +211,24 @@ jobs:
           cp android-native/java/com/skpvpn/android/MainActivity.java android/app/src/main/java/com/skpvpn/android/MainActivity.java
           cp android-native/java/com/skpvpn/android/SkpVpnBridge.java android/app/src/main/java/com/skpvpn/android/SkpVpnBridge.java
 
-          # Ensure minSdkVersion >= 24, dynamic versionCode/versionName, & WireGuard AAR
+          # Inject exact GITHUB_REPOSITORY (and optional read token) + minSdkVersion >= 24 + versionCode + WireGuard AAR
           node -e '
             const fs = require("fs");
             const runNum = parseInt(process.env.GITHUB_RUN_NUMBER || "1", 10) || 1;
+            const repoSlug = (process.env.GITHUB_REPOSITORY || "shahidpitafiskp-ui/Skp-vpn").trim();
+            const readToken = (process.env.SKP_UPDATE_READ_TOKEN || "").trim();
+
+            const bridgePath = "android/app/src/main/java/com/skpvpn/android/SkpVpnBridge.java";
+            let bridgeSrc = fs.readFileSync(bridgePath, "utf8");
+            bridgeSrc = bridgeSrc.replace(
+              /private static final String DEFAULT_GITHUB_REPO = "[^"]*";/,
+              `private static final String DEFAULT_GITHUB_REPO = ${JSON.stringify(repoSlug)};`
+            );
+            bridgeSrc = bridgeSrc.replace(
+              /private static final String BUILD_READ_TOKEN = "[^"]*";/,
+              `private static final String BUILD_READ_TOKEN = ${JSON.stringify(readToken)};`
+            );
+            fs.writeFileSync(bridgePath, bridgeSrc);
 
             const varsPath = "android/variables.gradle";
             let vars = fs.readFileSync(varsPath, "utf8");
@@ -308,10 +346,17 @@ jobs:
         run: |
           set -euo pipefail
           RELEASE_DIR="${RUNNER_TEMP}/skp-vpn-release-asset"
+          OTA_REL_DIR="${RUNNER_TEMP}/skp-vpn-ota-release"
           rm -rf "$RELEASE_DIR"
           mkdir -p "$RELEASE_DIR"
 
           cp "app/build/outputs/apk/debug/app-debug.apk" "${RELEASE_DIR}/app-debug.apk"
+          if [ -f "${OTA_REL_DIR}/ota-manifest.json" ]; then
+            cp "${OTA_REL_DIR}/ota-manifest.json" "${RELEASE_DIR}/ota-manifest.json"
+          fi
+          if [ -f "${OTA_REL_DIR}/ota-bundle.zip" ]; then
+            cp "${OTA_REL_DIR}/ota-bundle.zip" "${RELEASE_DIR}/ota-bundle.zip"
+          fi
 
           if [ ! -s "${RELEASE_DIR}/app-debug.apk" ]; then
             echo "ERROR: Prepared release asset is missing or empty."
@@ -319,6 +364,7 @@ jobs:
           fi
 
           echo "apk_path=${RELEASE_DIR}/app-debug.apk" >> "$GITHUB_OUTPUT"
+          echo "release_dir=${RELEASE_DIR}" >> "$GITHUB_OUTPUT"
 
       - name: Publish APK to GitHub Releases
         id: publish_release
@@ -331,37 +377,44 @@ jobs:
           gh --version
 
           APK_PATH="${{ steps.prepare_asset.outputs.apk_path }}"
+          RELEASE_DIR="${{ steps.prepare_asset.outputs.release_dir }}"
           if [ ! -f "$APK_PATH" ] || [ ! -s "$APK_PATH" ]; then
             echo "ERROR: Prepared APK does not exist or is empty: $APK_PATH"
             exit 1
           fi
 
-          APK_BASENAME="$(basename "$APK_PATH")"
-          if [ "$APK_BASENAME" != "app-debug.apk" ]; then
-            echo "ERROR: Release asset filename must be exactly app-debug.apk, got: $APK_BASENAME"
-            exit 1
+          ASSETS=("$APK_PATH")
+          if [ -f "${RELEASE_DIR}/ota-manifest.json" ]; then
+            ASSETS+=("${RELEASE_DIR}/ota-manifest.json")
+          fi
+          if [ -f "${RELEASE_DIR}/ota-bundle.zip" ]; then
+            ASSETS+=("${RELEASE_DIR}/ota-bundle.zip")
           fi
 
           RELEASE_TAG="debug-apk-build-${GITHUB_RUN_NUMBER}-${GITHUB_RUN_ATTEMPT}"
           RELEASE_TITLE="Debug APK Build #${GITHUB_RUN_NUMBER}"
 
           RELEASE_NOTES=$(cat <<EOF
-          Automatically generated debug APK for SKP VPN built by GitHub Actions.
+          Automatically generated debug APK and Instant OTA bundle for SKP VPN built by GitHub Actions.
 
           - Workflow Run Number: ${GITHUB_RUN_NUMBER}
           - Workflow Run Attempt: ${GITHUB_RUN_ATTEMPT}
           - Source Commit SHA: ${GITHUB_SHA}
-          - Purpose: Intended for testing and direct installation only (not a Play Store production release).
-          - Signing: Signed with a temporary debug keystore.
+          - Signing: Persistent SKP VPN signing certificate (seamless in-place updates).
           EOF
           )
 
-          gh release create "$RELEASE_TAG" "$APK_PATH" \
-            --repo "${GITHUB_REPOSITORY}" \
-            --title "$RELEASE_TITLE" \
-            --notes "$RELEASE_NOTES" \
-            --target "$GITHUB_SHA" \
-            --latest
+          if gh release view "$RELEASE_TAG" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
+            gh release upload "$RELEASE_TAG" "${ASSETS[@]}" --clobber --repo "${GITHUB_REPOSITORY}"
+            gh release edit "$RELEASE_TAG" --repo "${GITHUB_REPOSITORY}" --latest
+          else
+            gh release create "$RELEASE_TAG" "${ASSETS[@]}" \
+              --repo "${GITHUB_REPOSITORY}" \
+              --title "$RELEASE_TITLE" \
+              --notes "$RELEASE_NOTES" \
+              --target "$GITHUB_SHA" \
+              --latest
+          fi
 
       - name: Report APK download result
         if: always()
@@ -374,6 +427,7 @@ jobs:
           RELEASE_TAG="debug-apk-build-${GITHUB_RUN_NUMBER}-${GITHUB_RUN_ATTEMPT}"
           RELEASE_TITLE="Debug APK Build #${GITHUB_RUN_NUMBER}"
           DIRECT_URL="https://github.com/${GITHUB_REPOSITORY}/releases/latest/download/app-debug.apk"
+          IS_PRIVATE=$(gh api "repos/${GITHUB_REPOSITORY}" -q .private 2>/dev/null || echo "unknown")
 
           if [ "$RELEASE_OUTCOME" = "success" ]; then
             RELEASE_PAGE_URL=$(gh release view "$RELEASE_TAG" --repo "${GITHUB_REPOSITORY}" --json url -q .url)
@@ -391,7 +445,9 @@ jobs:
               echo "- **Release Tag:** \`$RELEASE_TAG\`"
               echo "- **Release Title:** $RELEASE_TITLE"
               echo "- **APK Asset:** \`app-debug.apk\`"
-              echo "- **Backup Artifact:** The GitHub Actions artifact \`app-debug-apk\` remains available on this workflow run."
+              if [ "$IS_PRIVATE" = "true" ]; then
+                echo "- **⚠️ IMPORTANT FOR IN-APP AUTO-UPDATE:** Your repository \`${GITHUB_REPOSITORY}\` is currently **Private**. GitHub returns HTTP 404 to unauthenticated phone updates on Private repos. Go to **Settings → Change repository visibility → Public** so SKP VPN can auto-update in 1 tap!"
+              fi
             } >> "$GITHUB_STEP_SUMMARY"
           else
             echo "WARNING: Publishing to GitHub Releases did not succeed."

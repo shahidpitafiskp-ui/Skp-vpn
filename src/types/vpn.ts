@@ -82,10 +82,13 @@ export interface NativeVpnEventPayload {
     | 'installer_opened'
     | 'applied'
     | 'up_to_date'
+    | 'repo_private'
     | 'error';
   otaVersion?: string;
   otaProgress?: number;
   otaError?: string;
+  otaErrorCode?: string;
+  githubRepo?: string;
   installedBuild?: number;
 }
 

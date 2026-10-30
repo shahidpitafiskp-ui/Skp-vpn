@@ -70,10 +70,8 @@ public class SkpVpnBridge {
     private static final String CHANNEL_ID = "skp_vpn_tunnel_status";
     private static final int NOTIFICATION_ID = 4401;
 
-    private static final String GITHUB_OTA_COMMIT_API = "https://api.github.com/repos/shahidpitafiskp-ui/Skp-vpn/commits/ota-live";
-    private static final String OTA_MANIFEST_URL = "https://raw.githubusercontent.com/shahidpitafiskp-ui/Skp-vpn/ota-live/ota-manifest.json";
-    private static final String OTA_BUNDLE_URL = "https://raw.githubusercontent.com/shahidpitafiskp-ui/Skp-vpn/ota-live/ota-bundle.zip";
-    private static final String DEFAULT_DIRECT_APK_URL = "https://github.com/shahidpitafiskp-ui/Skp-vpn/releases/latest/download/app-debug.apk";
+    private static final String DEFAULT_GITHUB_REPO = "shahidpitafiskp-ui/Skp-vpn";
+    private static final String BUILD_READ_TOKEN = "";
 
     // Pre-registered WireGuard emergency fallback profile if ISP blocks initial key registration prior to VPN activation
     private static final String FALLBACK_PRIV_KEY = "eCHsg7bPjbcqcShDRokQYEloCr6oKDX9kn3DDzKoBEE=";
@@ -124,6 +122,7 @@ public class SkpVpnBridge {
     private volatile String otaVersion = "";
     private volatile int otaProgress = 0;
     private volatile String otaError = "";
+    private volatile String otaErrorCode = "";
     private volatile File pendingApkInstallFile = null;
     private volatile long lastOtaCheckMs = 0L;
 
@@ -261,6 +260,48 @@ public class SkpVpnBridge {
         return Math.max(apkVer, otaRun);
     }
 
+    private String getEffectiveRepo() {
+        try {
+            SharedPreferences prefs = appContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE);
+            String saved = prefs.getString("ota_github_repo", null);
+            if (saved != null) {
+                String trimmed = saved.trim();
+                if (isValidRepoSlug(trimmed)) {
+                    return trimmed;
+                }
+            }
+        } catch (Exception ignored) {
+        }
+        return DEFAULT_GITHUB_REPO;
+    }
+
+    private boolean isValidRepoSlug(String slug) {
+        if (slug == null || slug.length() < 3) return false;
+        int slash = slug.indexOf('/');
+        return slash > 0 && slash < slug.length() - 1 && slug.indexOf('/', slash + 1) == -1 && !slug.contains(" ");
+    }
+
+    private String getDefaultDirectApkUrl() {
+        return "https://github.com/" + getEffectiveRepo() + "/releases/latest/download/app-debug.apk";
+    }
+
+    @JavascriptInterface
+    public String getConfiguredRepo() {
+        return getEffectiveRepo();
+    }
+
+    @JavascriptInterface
+    public void syncUpdateRepo(String repoSlug) {
+        if (repoSlug == null) return;
+        String trimmed = repoSlug.trim();
+        if (!isValidRepoSlug(trimmed)) return;
+        try {
+            SharedPreferences prefs = appContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE);
+            prefs.edit().putString("ota_github_repo", trimmed).apply();
+        } catch (Exception ignored) {
+        }
+    }
+
     @JavascriptInterface
     public void triggerOtaUpdateCheck() {
         checkForOtaUpdateAsync(true);
@@ -268,9 +309,9 @@ public class SkpVpnBridge {
 
     @JavascriptInterface
     public void downloadAndInstallApk(String apkUrl) {
-        final String targetUrl = (apkUrl != null && !apkUrl.trim().isEmpty())
+        final String initialTargetUrl = (apkUrl != null && !apkUrl.trim().isEmpty())
             ? apkUrl.trim()
-            : DEFAULT_DIRECT_APK_URL;
+            : getDefaultDirectApkUrl();
 
         if (!apkDownloadInProgress.compareAndSet(false, true)) {
             return;
@@ -279,6 +320,7 @@ public class SkpVpnBridge {
         otaStatus = "downloading_apk";
         otaProgress = 1;
         otaError = "";
+        otaErrorCode = "";
         emitCurrentState();
 
         Executors.newSingleThreadExecutor().execute(() -> {
@@ -297,9 +339,32 @@ public class SkpVpnBridge {
                     partFile.delete();
                 }
 
-                conn = openConnectionFollowRedirects(targetUrl, 8, 15000, 30000);
+                String resolvedDownloadUrl = initialTargetUrl;
+                String acceptHeader = "*/*";
+                conn = openConnectionFollowRedirects(resolvedDownloadUrl, 8, 15000, 30000, acceptHeader);
                 int status = conn.getResponseCode();
+
+                if (status == 404) {
+                    conn.disconnect();
+                    conn = null;
+                    ReleaseCheckResult fallbackRel = fetchLatestReleaseMetadata(getEffectiveRepo());
+                    if (fallbackRel != null && fallbackRel.downloadUrl != null && !fallbackRel.downloadUrl.isEmpty()) {
+                        resolvedDownloadUrl = fallbackRel.downloadUrl;
+                        acceptHeader = fallbackRel.useApiOctetStream ? "application/octet-stream" : "*/*";
+                        conn = openConnectionFollowRedirects(resolvedDownloadUrl, 8, 15000, 30000, acceptHeader);
+                        status = conn.getResponseCode();
+                    }
+                }
+
                 if (status != 200) {
+                    if (status == 404 && isRepoPrivateOrUnreachable(getEffectiveRepo())) {
+                        otaStatus = "repo_private";
+                        otaProgress = 0;
+                        otaErrorCode = "repo_private";
+                        otaError = "GitHub repository (" + getEffectiveRepo() + ") is Private. Change repository visibility to Public in GitHub Settings for direct in-app updates.";
+                        emitCurrentState();
+                        return;
+                    }
                     throw new Exception("Update download failed (HTTP " + status + ")");
                 }
 
@@ -356,6 +421,7 @@ public class SkpVpnBridge {
                 otaProgress = 100;
                 otaStatus = "installing_apk";
                 otaError = "";
+                otaErrorCode = "";
                 emitCurrentState();
 
                 promptInstallApkFile(finalApk);
@@ -381,7 +447,7 @@ public class SkpVpnBridge {
         if (finalApk.exists() && finalApk.length() > 500_000L) {
             promptInstallApkFile(finalApk);
         } else {
-            downloadAndInstallApk(DEFAULT_DIRECT_APK_URL);
+            downloadAndInstallApk(getDefaultDirectApkUrl());
         }
     }
 
@@ -472,13 +538,37 @@ public class SkpVpnBridge {
         }
     }
 
+    private static final class ReleaseCheckResult {
+        final int buildNumber;
+        final String downloadUrl;
+        final boolean useApiOctetStream;
+
+        ReleaseCheckResult(int buildNumber, String downloadUrl, boolean useApiOctetStream) {
+            this.buildNumber = buildNumber;
+            this.downloadUrl = downloadUrl;
+            this.useApiOctetStream = useApiOctetStream;
+        }
+    }
+
+    private boolean shouldAttachGitHubToken(URL url) {
+        if (BUILD_READ_TOKEN == null || BUILD_READ_TOKEN.trim().isEmpty() || url == null) {
+            return false;
+        }
+        String host = url.getHost() != null ? url.getHost().toLowerCase(Locale.US) : "";
+        return "api.github.com".equals(host) ||
+               "github.com".equals(host) ||
+               "raw.githubusercontent.com".equals(host);
+    }
+
     private HttpURLConnection openConnectionFollowRedirects(
         String initialUrl,
         int maxRedirects,
         int connectTimeoutMs,
-        int readTimeoutMs
+        int readTimeoutMs,
+        String acceptHeader
     ) throws Exception {
         String currentUrl = initialUrl;
+        String currentAccept = (acceptHeader != null && !acceptHeader.isEmpty()) ? acceptHeader : "*/*";
         for (int hop = 0; hop <= maxRedirects; hop++) {
             URL url = new URL(currentUrl);
             HttpURLConnection conn = (HttpURLConnection) url.openConnection();
@@ -488,8 +578,11 @@ public class SkpVpnBridge {
             conn.setUseCaches(false);
             conn.setRequestProperty("Cache-Control", "no-cache, no-store, must-revalidate");
             conn.setRequestProperty("Pragma", "no-cache");
-            conn.setRequestProperty("User-Agent", "SKP-VPN-Android-Updater/1.0");
-            conn.setRequestProperty("Accept", "*/*");
+            conn.setRequestProperty("User-Agent", "SKP-VPN-Android-Updater/1.1");
+            conn.setRequestProperty("Accept", currentAccept);
+            if (shouldAttachGitHubToken(url)) {
+                conn.setRequestProperty("Authorization", "Bearer " + BUILD_READ_TOKEN.trim());
+            }
 
             int code = conn.getResponseCode();
             if (code == HttpURLConnection.HTTP_MOVED_PERM ||
@@ -504,6 +597,7 @@ public class SkpVpnBridge {
                 }
                 URL nextUrl = new URL(url, location);
                 currentUrl = nextUrl.toExternalForm();
+                currentAccept = "*/*";
                 continue;
             }
             return conn;
@@ -522,29 +616,141 @@ public class SkpVpnBridge {
         return conn.getContentLength();
     }
 
-    private String resolveLatestOtaCommitSha() {
-        HttpURLConnection apiConn = null;
-        try {
-            URL url = new URL(GITHUB_OTA_COMMIT_API + "?t=" + System.currentTimeMillis());
-            apiConn = (HttpURLConnection) url.openConnection();
-            apiConn.setConnectTimeout(4500);
-            apiConn.setReadTimeout(4500);
-            apiConn.setUseCaches(false);
-            apiConn.setRequestProperty("Accept", "application/vnd.github+json");
-            apiConn.setRequestProperty("Cache-Control", "no-cache");
-            apiConn.setRequestProperty("User-Agent", "SKP-VPN-Android-Updater/1.0");
+    private String readStreamUtf8(InputStream inputStream) throws Exception {
+        StringBuilder sb = new StringBuilder();
+        try (BufferedReader br = new BufferedReader(
+            new InputStreamReader(inputStream, StandardCharsets.UTF_8)
+        )) {
+            String line;
+            while ((line = br.readLine()) != null) {
+                sb.append(line);
+            }
+        }
+        return sb.toString();
+    }
 
-            if (apiConn.getResponseCode() == 200) {
-                StringBuilder sb = new StringBuilder();
-                try (BufferedReader br = new BufferedReader(
-                    new InputStreamReader(apiConn.getInputStream(), StandardCharsets.UTF_8)
-                )) {
-                    String line;
-                    while ((line = br.readLine()) != null) {
-                        sb.append(line);
+    private int parseBuildNumberFromTag(String tag) {
+        if (tag == null || tag.isEmpty()) return 0;
+        try {
+            String lower = tag.toLowerCase(Locale.US);
+            String prefix = "debug-apk-build-";
+            int idx = lower.indexOf(prefix);
+            if (idx >= 0) {
+                int start = idx + prefix.length();
+                int end = start;
+                while (end < lower.length() && Character.isDigit(lower.charAt(end))) {
+                    end++;
+                }
+                if (end > start) {
+                    return Integer.parseInt(lower.substring(start, end));
+                }
+            }
+        } catch (Exception ignored) {
+        }
+        return 0;
+    }
+
+    private boolean isRepoPrivateOrUnreachable(String repo) {
+        HttpURLConnection conn = null;
+        try {
+            String repoApiUrl = "https://api.github.com/repos/" + repo + "?t=" + System.currentTimeMillis();
+            conn = openConnectionFollowRedirects(repoApiUrl, 3, 5000, 5000, "application/vnd.github+json");
+            return conn.getResponseCode() == 404;
+        } catch (Exception ignored) {
+            return false;
+        } finally {
+            if (conn != null) conn.disconnect();
+        }
+    }
+
+    private boolean isPublicRepoReachable(String repo) {
+        HttpURLConnection conn = null;
+        try {
+            String repoApiUrl = "https://api.github.com/repos/" + repo + "?t=" + System.currentTimeMillis();
+            conn = openConnectionFollowRedirects(repoApiUrl, 3, 5000, 5000, "application/vnd.github+json");
+            return conn.getResponseCode() == 200;
+        } catch (Exception ignored) {
+            return false;
+        } finally {
+            if (conn != null) conn.disconnect();
+        }
+    }
+
+    private ReleaseCheckResult parseReleaseJsonObject(JSONObject relObj, String repo) {
+        if (relObj == null) return null;
+        int buildNum = parseBuildNumberFromTag(relObj.optString("tag_name", ""));
+        JSONArray assets = relObj.optJSONArray("assets");
+        String downloadUrl = "https://github.com/" + repo + "/releases/latest/download/app-debug.apk";
+        boolean useOctet = false;
+
+        if (assets != null && assets.length() > 0) {
+            JSONObject chosen = null;
+            for (int i = 0; i < assets.length(); i++) {
+                JSONObject item = assets.optJSONObject(i);
+                if (item != null && "app-debug.apk".equals(item.optString("name", ""))) {
+                    chosen = item;
+                    break;
+                }
+            }
+            if (chosen == null) {
+                chosen = assets.optJSONObject(0);
+            }
+            if (chosen != null) {
+                if (BUILD_READ_TOKEN != null && !BUILD_READ_TOKEN.trim().isEmpty()) {
+                    String apiAssetUrl = chosen.optString("url", "");
+                    if (!apiAssetUrl.isEmpty()) {
+                        downloadUrl = apiAssetUrl;
+                        useOctet = true;
+                    }
+                } else {
+                    String browserUrl = chosen.optString("browser_download_url", "");
+                    if (!browserUrl.isEmpty()) {
+                        downloadUrl = browserUrl;
                     }
                 }
-                JSONObject obj = new JSONObject(sb.toString());
+            }
+        }
+        return new ReleaseCheckResult(buildNum, downloadUrl, useOctet);
+    }
+
+    private ReleaseCheckResult fetchLatestReleaseMetadata(String repo) {
+        HttpURLConnection latestConn = null;
+        try {
+            String latestUrl = "https://api.github.com/repos/" + repo + "/releases/latest?t=" + System.currentTimeMillis();
+            latestConn = openConnectionFollowRedirects(latestUrl, 4, 5500, 5500, "application/vnd.github+json");
+            if (latestConn.getResponseCode() == 200) {
+                JSONObject obj = new JSONObject(readStreamUtf8(latestConn.getInputStream()));
+                return parseReleaseJsonObject(obj, repo);
+            }
+        } catch (Exception ignored) {
+        } finally {
+            if (latestConn != null) latestConn.disconnect();
+        }
+
+        HttpURLConnection listConn = null;
+        try {
+            String listUrl = "https://api.github.com/repos/" + repo + "/releases?per_page=5&t=" + System.currentTimeMillis();
+            listConn = openConnectionFollowRedirects(listUrl, 4, 5500, 5500, "application/vnd.github+json");
+            if (listConn.getResponseCode() == 200) {
+                JSONArray arr = new JSONArray(readStreamUtf8(listConn.getInputStream()));
+                if (arr.length() > 0) {
+                    return parseReleaseJsonObject(arr.optJSONObject(0), repo);
+                }
+            }
+        } catch (Exception ignored) {
+        } finally {
+            if (listConn != null) listConn.disconnect();
+        }
+        return null;
+    }
+
+    private String resolveLatestOtaCommitSha(String repo) {
+        HttpURLConnection apiConn = null;
+        try {
+            String commitApi = "https://api.github.com/repos/" + repo + "/commits/ota-live?t=" + System.currentTimeMillis();
+            apiConn = openConnectionFollowRedirects(commitApi, 3, 4500, 4500, "application/vnd.github+json");
+            if (apiConn.getResponseCode() == 200) {
+                JSONObject obj = new JSONObject(readStreamUtf8(apiConn.getInputStream()));
                 String sha = obj.optString("sha", "").trim();
                 if (sha.length() >= 7) {
                     return sha;
@@ -555,6 +761,86 @@ public class SkpVpnBridge {
             if (apiConn != null) apiConn.disconnect();
         }
         return "";
+    }
+
+    private JSONObject fetchManifestFromMirrors(String repo, String refSha) {
+        long ts = System.currentTimeMillis();
+        String ref = (refSha != null && refSha.length() >= 7) ? refSha : "ota-live";
+
+        List<String[]> candidates = new ArrayList<>();
+        if (BUILD_READ_TOKEN != null && !BUILD_READ_TOKEN.trim().isEmpty()) {
+            candidates.add(new String[]{
+                "https://api.github.com/repos/" + repo + "/contents/ota-manifest.json?ref=" + ref + "&t=" + ts,
+                "application/vnd.github.raw+json"
+            });
+        }
+        candidates.add(new String[]{
+            "https://raw.githubusercontent.com/" + repo + "/" + ref + "/ota-manifest.json?t=" + ts,
+            "*/*"
+        });
+        candidates.add(new String[]{
+            "https://cdn.jsdelivr.net/gh/" + repo + "@" + ref + "/ota-manifest.json?t=" + ts,
+            "*/*"
+        });
+        candidates.add(new String[]{
+            "https://github.com/" + repo + "/releases/latest/download/ota-manifest.json?t=" + ts,
+            "*/*"
+        });
+
+        for (String[] entry : candidates) {
+            HttpURLConnection conn = null;
+            try {
+                conn = openConnectionFollowRedirects(entry[0], 6, 5500, 5500, entry[1]);
+                if (conn.getResponseCode() == 200) {
+                    String raw = readStreamUtf8(conn.getInputStream());
+                    JSONObject parsed = new JSONObject(raw);
+                    if (parsed.has("runNumber")) {
+                        return parsed;
+                    }
+                }
+            } catch (Exception ignored) {
+            } finally {
+                if (conn != null) conn.disconnect();
+            }
+        }
+        return null;
+    }
+
+    private HttpURLConnection openFirstAvailableBundleStream(String repo, String refSha) {
+        long ts = System.currentTimeMillis();
+        String ref = (refSha != null && refSha.length() >= 7) ? refSha : "ota-live";
+
+        List<String[]> candidates = new ArrayList<>();
+        if (BUILD_READ_TOKEN != null && !BUILD_READ_TOKEN.trim().isEmpty()) {
+            candidates.add(new String[]{
+                "https://api.github.com/repos/" + repo + "/contents/ota-bundle.zip?ref=" + ref + "&t=" + ts,
+                "application/vnd.github.raw+json"
+            });
+        }
+        candidates.add(new String[]{
+            "https://raw.githubusercontent.com/" + repo + "/" + ref + "/ota-bundle.zip?t=" + ts,
+            "*/*"
+        });
+        candidates.add(new String[]{
+            "https://cdn.jsdelivr.net/gh/" + repo + "@" + ref + "/ota-bundle.zip?t=" + ts,
+            "*/*"
+        });
+        candidates.add(new String[]{
+            "https://github.com/" + repo + "/releases/latest/download/ota-bundle.zip?t=" + ts,
+            "*/*"
+        });
+
+        for (String[] entry : candidates) {
+            try {
+                HttpURLConnection conn = openConnectionFollowRedirects(entry[0], 6, 10000, 20000, entry[1]);
+                if (conn.getResponseCode() == 200) {
+                    return conn;
+                }
+                conn.disconnect();
+            } catch (Exception ignored) {
+            }
+        }
+        return null;
     }
 
     public void checkForOtaUpdateAsync(final boolean forceNow) {
@@ -574,30 +860,72 @@ public class SkpVpnBridge {
             otaStatus = "checking";
             otaProgress = 0;
             otaError = "";
+            otaErrorCode = "";
             emitCurrentState();
         }
 
         otaExecutor.execute(() -> {
-            HttpURLConnection manifestConn = null;
             try {
                 SharedPreferences prefs = appContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE);
                 int currentBuild = getInstalledBuildNumber();
                 String currentCommit = prefs.getString("ota_commit", "");
+                String repo = getEffectiveRepo();
 
-                // Resolve immutable commit SHA via GitHub API to bypass 5-min raw.githubusercontent CDN cache
-                String latestOtaRefSha = resolveLatestOtaCommitSha();
-                String manifestTargetUrl = !latestOtaRefSha.isEmpty()
-                    ? ("https://raw.githubusercontent.com/shahidpitafiskp-ui/Skp-vpn/" + latestOtaRefSha + "/ota-manifest.json")
-                    : (OTA_MANIFEST_URL + "?t=" + System.currentTimeMillis());
-                String bundleTargetUrl = !latestOtaRefSha.isEmpty()
-                    ? ("https://raw.githubusercontent.com/shahidpitafiskp-ui/Skp-vpn/" + latestOtaRefSha + "/ota-bundle.zip")
-                    : (OTA_BUNDLE_URL + "?t=" + System.currentTimeMillis());
+                String latestOtaRefSha = resolveLatestOtaCommitSha(repo);
+                JSONObject manifest = fetchManifestFromMirrors(repo, latestOtaRefSha);
 
-                manifestConn = openConnectionFollowRedirects(manifestTargetUrl, 5, 6000, 6000);
-                if (manifestConn.getResponseCode() != 200) {
+                if (manifest == null) {
+                    // Fallback seamlessly to GitHub Releases metadata when OTA manifest is unavailable
+                    ReleaseCheckResult releaseMeta = fetchLatestReleaseMetadata(repo);
+                    if (releaseMeta != null && releaseMeta.buildNumber > 0) {
+                        if (releaseMeta.buildNumber <= currentBuild) {
+                            otaStatus = "up_to_date";
+                            otaProgress = 100;
+                            otaError = "";
+                            otaErrorCode = "";
+                            otaVersion = "v1." + currentBuild + ".0";
+                            emitCurrentState();
+                            return;
+                        }
+                        otaVersion = "v1." + releaseMeta.buildNumber + ".0";
+                        if (forceNow) {
+                            otaCheckInProgress.set(false);
+                            downloadAndInstallApk(releaseMeta.downloadUrl);
+                            return;
+                        }
+                        otaStatus = "idle";
+                        emitCurrentState();
+                        return;
+                    }
+
+                    // Check if repo is Public (meaning current installed build is already the newest) vs Private
+                    if (isPublicRepoReachable(repo)) {
+                        otaStatus = "up_to_date";
+                        otaProgress = 100;
+                        otaError = "";
+                        otaErrorCode = "";
+                        otaVersion = "v1." + currentBuild + ".0";
+                        emitCurrentState();
+                        return;
+                    }
+
+                    if (isRepoPrivateOrUnreachable(repo)) {
+                        otaErrorCode = "repo_private";
+                        if (forceNow) {
+                            otaStatus = "repo_private";
+                            otaError = "GitHub repository (" + repo + ") is currently Private. Change visibility to Public in GitHub Settings for 1-tap auto updates.";
+                        } else {
+                            otaStatus = "idle";
+                            otaError = "";
+                        }
+                        emitCurrentState();
+                        return;
+                    }
+
                     if (forceNow) {
                         otaStatus = "error";
-                        otaError = "Update manifest unavailable (HTTP " + manifestConn.getResponseCode() + "). Use Full App Update below.";
+                        otaErrorCode = "network_error";
+                        otaError = "Could not connect to update server. Check internet connection and try again.";
                     } else {
                         otaStatus = "idle";
                     }
@@ -605,17 +933,6 @@ public class SkpVpnBridge {
                     return;
                 }
 
-                StringBuilder sb = new StringBuilder();
-                try (BufferedReader br = new BufferedReader(
-                    new InputStreamReader(manifestConn.getInputStream(), StandardCharsets.UTF_8)
-                )) {
-                    String line;
-                    while ((line = br.readLine()) != null) {
-                        sb.append(line);
-                    }
-                }
-
-                JSONObject manifest = new JSONObject(sb.toString());
                 int remoteRun = manifest.optInt("runNumber", 0);
                 String remoteCommit = manifest.optString("commit", "");
 
@@ -626,7 +943,8 @@ public class SkpVpnBridge {
                     otaStatus = "up_to_date";
                     otaProgress = 100;
                     otaError = "";
-                    otaVersion = remoteRun > 0 ? ("v1." + remoteRun + ".0") : "";
+                    otaErrorCode = "";
+                    otaVersion = remoteRun > 0 ? ("v1." + remoteRun + ".0") : ("v1." + currentBuild + ".0");
                     emitCurrentState();
                     return;
                 }
@@ -634,6 +952,7 @@ public class SkpVpnBridge {
                 otaStatus = "downloading";
                 otaProgress = 5;
                 otaError = "";
+                otaErrorCode = "";
                 otaVersion = "v1." + remoteRun + ".0";
                 emitCurrentState();
 
@@ -645,11 +964,17 @@ public class SkpVpnBridge {
 
                 HttpURLConnection zipConn = null;
                 try {
-                    zipConn = openConnectionFollowRedirects(bundleTargetUrl, 5, 10000, 20000);
-                    if (zipConn.getResponseCode() != 200) {
+                    zipConn = openFirstAvailableBundleStream(repo, latestOtaRefSha);
+                    if (zipConn == null) {
+                        ReleaseCheckResult releaseMeta = fetchLatestReleaseMetadata(repo);
+                        if (forceNow && releaseMeta != null && releaseMeta.buildNumber > currentBuild) {
+                            otaCheckInProgress.set(false);
+                            downloadAndInstallApk(releaseMeta.downloadUrl);
+                            return;
+                        }
                         otaStatus = forceNow ? "error" : "idle";
                         if (forceNow) {
-                            otaError = "Could not download instant bundle (HTTP " + zipConn.getResponseCode() + ").";
+                            otaError = "Could not download instant bundle. Try Full App Update below.";
                         }
                         emitCurrentState();
                         return;
@@ -729,6 +1054,7 @@ public class SkpVpnBridge {
                 otaProgress = 100;
                 otaStatus = "applied";
                 otaError = "";
+                otaErrorCode = "";
                 emitCurrentState();
 
                 MainActivity activity = activityRef != null ? activityRef.get() : null;
@@ -745,7 +1071,6 @@ public class SkpVpnBridge {
                 }
                 emitCurrentState();
             } finally {
-                if (manifestConn != null) manifestConn.disconnect();
                 otaCheckInProgress.set(false);
             }
         });
@@ -1475,6 +1800,8 @@ public class SkpVpnBridge {
             obj.put("otaVersion", otaVersion);
             obj.put("otaProgress", otaProgress);
             obj.put("otaError", otaError);
+            obj.put("otaErrorCode", otaErrorCode);
+            obj.put("githubRepo", getEffectiveRepo());
             obj.put("installedBuild", getInstalledBuildNumber());
             long durSec = ("CONNECTED".equals(currentState) && connectedSinceMs > 0L)
                 ? Math.max(0L, (System.currentTimeMillis() - connectedSinceMs) / 1000L)

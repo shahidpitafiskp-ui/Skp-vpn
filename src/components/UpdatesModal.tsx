@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   X,
   RefreshCw,
@@ -8,25 +8,24 @@ import {
   AlertCircle,
   Zap,
   ShieldCheck,
+  ExternalLink,
+  Lock,
 } from 'lucide-react';
 import { Language } from '../types/vpn';
 import {
   applyWebInstantUpdate,
   formatBytesCompact,
+  getNativeConfiguredRepo,
   getNativeInstalledBuildNumber,
   hasNativeInAppApkInstaller,
   isNativeAndroidVpn,
   nativeDownloadAndInstallApk,
   nativeInstallDownloadedApkIfReady,
   openNativeExternalUrl,
+  syncNativeUpdateRepo,
   triggerNativeOtaUpdateCheck,
 } from '../utils/nativeVpn';
-
-const GITHUB_REPO = 'shahidpitafiskp-ui/Skp-vpn';
-const GITHUB_OTA_COMMIT_API = `https://api.github.com/repos/${GITHUB_REPO}/commits/ota-live`;
-const OTA_MANIFEST_URL = `https://raw.githubusercontent.com/${GITHUB_REPO}/ota-live/ota-manifest.json`;
-const LATEST_RELEASE_API = `https://api.github.com/repos/${GITHUB_REPO}/releases/latest`;
-const DIRECT_APK_URL = `https://github.com/${GITHUB_REPO}/releases/latest/download/app-debug.apk`;
+import { GITHUB_REPO, getRepoUrls } from '../utils/updateConfig';
 
 interface GitHubReleaseInfo {
   buildNumber: number | null;
@@ -43,6 +42,8 @@ interface UpdatesModalProps {
   otaStatus?: string;
   otaProgress?: number;
   otaError?: string;
+  otaErrorCode?: string;
+  otaGithubRepo?: string;
   otaVersion?: string;
   onClose: () => void;
 }
@@ -60,6 +61,8 @@ export const UpdatesModal: React.FC<UpdatesModalProps> = ({
   otaStatus = 'idle',
   otaProgress = 0,
   otaError = '',
+  otaErrorCode = '',
+  otaGithubRepo = '',
   otaVersion = '',
   onClose,
 }) => {
@@ -74,129 +77,208 @@ export const UpdatesModal: React.FC<UpdatesModalProps> = ({
   const currentCommitSha =
     (import.meta.env.VITE_APP_COMMIT_SHA as string | undefined) || '';
 
+  const activeRepo = useMemo(() => {
+    const envRepo = (import.meta.env.VITE_GITHUB_REPO as string | undefined)?.trim();
+    if (envRepo && envRepo.includes('/')) {
+      return envRepo;
+    }
+    const nativeRepo = otaGithubRepo || getNativeConfiguredRepo() || '';
+    if (nativeRepo && nativeRepo.includes('/')) {
+      return nativeRepo;
+    }
+    return GITHUB_REPO;
+  }, [otaGithubRepo]);
+
+  const repoUrls = useMemo(() => getRepoUrls(activeRepo), [activeRepo]);
+
   const [checking, setChecking] = useState<boolean>(false);
   const [webUpdating, setWebUpdating] = useState<boolean>(false);
   const [releaseInfo, setReleaseInfo] = useState<GitHubReleaseInfo | null>(
     null
   );
   const [checkError, setCheckError] = useState<string | null>(null);
+  const [privateRepoDetected, setPrivateRepoDetected] =
+    useState<boolean>(false);
+
+  useEffect(() => {
+    if (activeRepo) {
+      syncNativeUpdateRepo(activeRepo);
+    }
+  }, [activeRepo]);
 
   const checkLatestUpdate = useCallback(async () => {
     setChecking(true);
     setCheckError(null);
+    setPrivateRepoDetected(false);
 
     try {
       let otaRunNum: number | null = null;
       let otaDate = '';
 
-      // 1. Resolve exact uncached commit SHA of ota-live via GitHub API to bypass 5-min CDN cache
-      let manifestUrlToFetch = `${OTA_MANIFEST_URL}?t=${Date.now()}`;
+      // 1. Resolve exact uncached commit SHA of ota-live via GitHub API if public
+      let latestSha = '';
       try {
-        const shaRes = await fetch(`${GITHUB_OTA_COMMIT_API}?t=${Date.now()}`, {
+        const shaRes = await fetch(`${repoUrls.otaCommitApi}?t=${Date.now()}`, {
           headers: { Accept: 'application/vnd.github+json' },
           cache: 'no-store',
         });
         if (shaRes.ok) {
           const shaData = await shaRes.json();
           if (typeof shaData.sha === 'string' && shaData.sha.length >= 7) {
-            manifestUrlToFetch = `https://raw.githubusercontent.com/${GITHUB_REPO}/${shaData.sha}/ota-manifest.json`;
+            latestSha = shaData.sha;
           }
         }
       } catch {
-        // Fallback to branch raw URL
+        // Fallback to multi-mirror manifest URLs
       }
+
+      // 2. Try all OTA manifest mirrors (GitHub Raw, jsDelivr CDN, GitHub Release asset)
+      const manifestMirrors = repoUrls.otaManifestMirrors(latestSha);
+      for (const mirrorUrl of manifestMirrors) {
+        try {
+          const otaRes = await fetch(mirrorUrl, { cache: 'no-store' });
+          if (otaRes.ok) {
+            const otaJson = await otaRes.json();
+            if (typeof otaJson.runNumber === 'number') {
+              otaRunNum = otaJson.runNumber;
+              if (otaJson.updatedAt) {
+                otaDate = new Date(otaJson.updatedAt).toLocaleString([], {
+                  month: 'short',
+                  day: 'numeric',
+                  hour: '2-digit',
+                  minute: '2-digit',
+                });
+              }
+              break;
+            }
+          }
+        } catch {
+          // Try next mirror
+        }
+      }
+
+      // 3. Query GitHub Releases (/releases/latest with fallback to /releases?per_page=5)
+      let releaseData: {
+        tag_name?: string;
+        published_at?: string;
+        assets?: Array<{
+          name?: string;
+          size?: number;
+          browser_download_url?: string;
+        }>;
+      } | null = null;
 
       try {
-        const otaRes = await fetch(manifestUrlToFetch, {
-          cache: 'no-store',
-        });
-        if (otaRes.ok) {
-          const otaJson = await otaRes.json();
-          if (typeof otaJson.runNumber === 'number') {
-            otaRunNum = otaJson.runNumber;
+        const latestRes = await fetch(
+          `${repoUrls.latestReleaseApi}?t=${Date.now()}`,
+          {
+            headers: { Accept: 'application/vnd.github+json' },
+            cache: 'no-store',
           }
-          if (otaJson.updatedAt) {
-            otaDate = new Date(otaJson.updatedAt).toLocaleString([], {
-              month: 'short',
-              day: 'numeric',
-              hour: '2-digit',
-              minute: '2-digit',
-            });
+        );
+        if (latestRes.ok) {
+          releaseData = await latestRes.json();
+        } else if (latestRes.status === 404) {
+          const listRes = await fetch(
+            `${repoUrls.releasesListApi}&t=${Date.now()}`,
+            {
+              headers: { Accept: 'application/vnd.github+json' },
+              cache: 'no-store',
+            }
+          );
+          if (listRes.ok) {
+            const listJson = await listRes.json();
+            if (Array.isArray(listJson) && listJson.length > 0) {
+              releaseData = listJson[0];
+            }
           }
         }
       } catch {
-        // Fallback to GitHub Releases API
+        // Handled below
       }
 
-      const res = await fetch(`${LATEST_RELEASE_API}?t=${Date.now()}`, {
-        headers: {
-          Accept: 'application/vnd.github+json',
-        },
+      if (releaseData) {
+        const assets = Array.isArray(releaseData.assets)
+          ? releaseData.assets
+          : [];
+        const apkAsset =
+          assets.find((a) => a && a.name === 'app-debug.apk') || assets[0];
+
+        const releaseBuildNum = parseBuildNumberFromTag(
+          String(releaseData.tag_name || '')
+        );
+        const bestBuildNum =
+          otaRunNum !== null && releaseBuildNum !== null
+            ? Math.max(otaRunNum, releaseBuildNum)
+            : otaRunNum ?? releaseBuildNum;
+
+        const publishedDate =
+          otaDate ||
+          (releaseData.published_at
+            ? new Date(releaseData.published_at).toLocaleString([], {
+                month: 'short',
+                day: 'numeric',
+                hour: '2-digit',
+                minute: '2-digit',
+              })
+            : '');
+
+        setReleaseInfo({
+          buildNumber: bestBuildNum,
+          otaBuildNumber: otaRunNum,
+          releaseApkBuildNumber: releaseBuildNum,
+          publishedAt: publishedDate,
+          apkSizeBytes:
+            apkAsset && typeof apkAsset.size === 'number'
+              ? apkAsset.size
+              : null,
+          downloadUrl:
+            apkAsset && typeof apkAsset.browser_download_url === 'string'
+              ? apkAsset.browser_download_url
+              : repoUrls.directApkUrl,
+        });
+        return;
+      }
+
+      if (otaRunNum !== null) {
+        setReleaseInfo({
+          buildNumber: otaRunNum,
+          otaBuildNumber: otaRunNum,
+          releaseApkBuildNumber: null,
+          publishedAt: otaDate,
+          apkSizeBytes: null,
+          downloadUrl: repoUrls.directApkUrl,
+        });
+        return;
+      }
+
+      // 4. Diagnose why both OTA & Releases returned 404: check if GitHub repo is Public vs Private
+      const repoRes = await fetch(`${repoUrls.repoApi}?t=${Date.now()}`, {
+        headers: { Accept: 'application/vnd.github+json' },
         cache: 'no-store',
       });
 
-      if (!res.ok) {
-        if (otaRunNum !== null) {
-          setReleaseInfo({
-            buildNumber: otaRunNum,
-            otaBuildNumber: otaRunNum,
-            releaseApkBuildNumber: null,
-            publishedAt: otaDate,
-            apkSizeBytes: null,
-            downloadUrl: DIRECT_APK_URL,
-          });
-          return;
-        }
-        if (res.status === 404) {
-          setReleaseInfo(null);
-          setCheckError(
-            language === 'ur'
-              ? 'ابھی نئی اپڈیٹ تیار ہو رہی ہے۔ چند لمحوں بعد دوبارہ چیک کریں۔'
-              : 'Latest build is being prepared on GitHub Actions. Check again shortly.'
-          );
-          return;
-        }
-        throw new Error(`HTTP ${res.status}`);
+      if (repoRes.ok) {
+        // Repo is Public and reachable, so installed build is already the latest!
+        const fallbackBuild = currentBuildNumber ?? 1;
+        setReleaseInfo({
+          buildNumber: fallbackBuild,
+          otaBuildNumber: fallbackBuild,
+          releaseApkBuildNumber: null,
+          publishedAt: '',
+          apkSizeBytes: null,
+          downloadUrl: repoUrls.directApkUrl,
+        });
+        return;
       }
 
-      const data = await res.json();
-      const assets = Array.isArray(data.assets) ? data.assets : [];
-      const apkAsset =
-        assets.find(
-          (a: { name?: string }) => a && a.name === 'app-debug.apk'
-        ) || assets[0];
+      if (repoRes.status === 404) {
+        setReleaseInfo(null);
+        setPrivateRepoDetected(true);
+        return;
+      }
 
-      const releaseBuildNum = parseBuildNumberFromTag(
-        String(data.tag_name || '')
-      );
-      const bestBuildNum =
-        otaRunNum !== null && releaseBuildNum !== null
-          ? Math.max(otaRunNum, releaseBuildNum)
-          : otaRunNum ?? releaseBuildNum;
-
-      const publishedDate =
-        otaDate ||
-        (data.published_at
-          ? new Date(data.published_at).toLocaleString([], {
-              month: 'short',
-              day: 'numeric',
-              hour: '2-digit',
-              minute: '2-digit',
-            })
-          : '');
-
-      setReleaseInfo({
-        buildNumber: bestBuildNum,
-        otaBuildNumber: otaRunNum,
-        releaseApkBuildNumber: releaseBuildNum,
-        publishedAt: publishedDate,
-        apkSizeBytes:
-          apkAsset && typeof apkAsset.size === 'number' ? apkAsset.size : null,
-        downloadUrl:
-          apkAsset && typeof apkAsset.browser_download_url === 'string'
-            ? apkAsset.browser_download_url
-            : DIRECT_APK_URL,
-      });
+      throw new Error(`HTTP ${repoRes.status}`);
     } catch {
       setCheckError(
         language === 'ur'
@@ -206,7 +288,7 @@ export const UpdatesModal: React.FC<UpdatesModalProps> = ({
     } finally {
       setChecking(false);
     }
-  }, [language]);
+  }, [currentBuildNumber, language, repoUrls]);
 
   useEffect(() => {
     if (isOpen) {
@@ -219,19 +301,27 @@ export const UpdatesModal: React.FC<UpdatesModalProps> = ({
   const nativeAndroid = isNativeAndroidVpn();
   const supportsDirectApkInstall = hasNativeInAppApkInstaller();
 
+  const isPrivateRepo =
+    privateRepoDetected ||
+    otaStatus === 'repo_private' ||
+    otaErrorCode === 'repo_private';
+
   const isNewerAvailable =
+    !isPrivateRepo &&
     releaseInfo?.buildNumber !== null &&
     releaseInfo?.buildNumber !== undefined &&
     (currentBuildNumber === null ||
       releaseInfo.buildNumber > currentBuildNumber);
 
   const isUpToDate =
-    releaseInfo?.buildNumber !== null &&
-    releaseInfo?.buildNumber !== undefined &&
-    currentBuildNumber !== null &&
-    releaseInfo.buildNumber <= currentBuildNumber;
+    !isPrivateRepo &&
+    ((releaseInfo?.buildNumber !== null &&
+      releaseInfo?.buildNumber !== undefined &&
+      currentBuildNumber !== null &&
+      releaseInfo.buildNumber <= currentBuildNumber) ||
+      otaStatus === 'up_to_date');
 
-  const targetUpdateUrl = releaseInfo?.downloadUrl || DIRECT_APK_URL;
+  const targetUpdateUrl = releaseInfo?.downloadUrl || repoUrls.directApkUrl;
 
   const isBusyUpdating =
     otaStatus === 'checking' ||
@@ -247,9 +337,7 @@ export const UpdatesModal: React.FC<UpdatesModalProps> = ({
 
   const handleSmartInAppUpdate = () => {
     if (nativeAndroid) {
-      // Trigger fast in-app OTA update first; if user has an older APK or wants full native package update,
-      // they can also tap Direct Full App Update below without ever opening an external browser!
-      const startedOta = triggerNativeOtaUpdateCheck();
+      const startedOta = triggerNativeOtaUpdateCheck(activeRepo);
       if (!startedOta && supportsDirectApkInstall) {
         nativeDownloadAndInstallApk(targetUpdateUrl);
       } else if (!startedOta) {
@@ -271,6 +359,12 @@ export const UpdatesModal: React.FC<UpdatesModalProps> = ({
       return;
     }
     openNativeExternalUrl(targetUpdateUrl);
+  };
+
+  const handleOpenRepoSettings = () => {
+    if (nativeAndroid) {
+      openNativeExternalUrl(repoUrls.repoSettingsUrl);
+    }
   };
 
   return (
@@ -295,7 +389,9 @@ export const UpdatesModal: React.FC<UpdatesModalProps> = ({
                 language === 'ur' ? 'font-urdu' : ''
               }`}
             >
-              {language === 'ur' ? 'ایپ اپڈیٹر (In-App Update)' : 'In-App Updater'}
+              {language === 'ur'
+                ? 'ایپ اپڈیٹر (In-App Update)'
+                : 'In-App Updater'}
             </h2>
           </div>
           <button
@@ -346,11 +442,21 @@ export const UpdatesModal: React.FC<UpdatesModalProps> = ({
                   ? '...'
                   : releaseInfo?.buildNumber
                   ? `v1.${releaseInfo.buildNumber}.0`
-                  : otaVersion || '—'}
+                  : otaVersion
+                  ? otaVersion
+                  : isPrivateRepo
+                  ? 'Private Repo'
+                  : currentBuildNumber !== null
+                  ? `v1.${currentBuildNumber}.0`
+                  : '—'}
               </div>
-              {releaseInfo?.publishedAt && (
+              {releaseInfo?.publishedAt ? (
                 <div className="text-[11px] text-slate-400 dark:text-slate-500 truncate">
                   {releaseInfo.publishedAt}
+                </div>
+              ) : (
+                <div className="text-[11px] font-mono-tabular text-slate-400 dark:text-slate-500 truncate">
+                  {activeRepo}
                 </div>
               )}
             </div>
@@ -362,7 +468,11 @@ export const UpdatesModal: React.FC<UpdatesModalProps> = ({
               <div className="flex items-center justify-between gap-2 text-xs font-semibold text-[#0B5D32] dark:text-emerald-300">
                 <span className="flex items-center gap-2 min-w-0">
                   <RefreshCw className="w-4 h-4 animate-spin text-[#15803D] dark:text-emerald-400 shrink-0" />
-                  <span className={`truncate ${language === 'ur' ? 'font-urdu' : ''}`}>
+                  <span
+                    className={`truncate ${
+                      language === 'ur' ? 'font-urdu' : ''
+                    }`}
+                  >
                     {otaStatus === 'downloading_apk'
                       ? language === 'ur'
                         ? 'ایپ کے اندر نئی اپڈیٹ ڈاؤنلوڈ ہو رہی ہے...'
@@ -380,7 +490,9 @@ export const UpdatesModal: React.FC<UpdatesModalProps> = ({
                       : 'Checking & syncing latest update...'}
                   </span>
                 </span>
-                <span className="font-mono-tabular shrink-0">{displayProgress}%</span>
+                <span className="font-mono-tabular shrink-0">
+                  {displayProgress}%
+                </span>
               </div>
 
               <progress
@@ -405,7 +517,7 @@ export const UpdatesModal: React.FC<UpdatesModalProps> = ({
               <button
                 type="button"
                 onClick={() => nativeInstallDownloadedApkIfReady()}
-                className="w-full min-h-[42px] px-3 py-2 rounded-lg bg-amber-600 hover:bg-amber-700 text-white text-xs font-semibold transition-colors cursor-pointer whitespace-nowrap"
+                className="w-full min-h-[44px] px-3 py-2 rounded-lg bg-amber-600 hover:bg-amber-700 text-white text-xs font-semibold transition-colors cursor-pointer whitespace-nowrap"
               >
                 {language === 'ur'
                   ? 'ڈاؤنلوڈ شدہ اپڈیٹ ابھی انسٹال کریں'
@@ -426,8 +538,77 @@ export const UpdatesModal: React.FC<UpdatesModalProps> = ({
             </div>
           )}
 
-          {/* Native OTA / APK Error Notice */}
-          {otaStatus === 'error' && otaError && (
+          {/* GitHub Private Repo One-Time Fix Guide (Eliminates Mystery HTTP 404) */}
+          {!isBusyUpdating && isPrivateRepo && (
+            <div className="p-3.5 rounded-xl bg-amber-50 dark:bg-amber-950/40 border border-amber-300 dark:border-amber-700/70 text-amber-950 dark:text-amber-100 text-xs space-y-2.5">
+              <div className="flex items-start gap-2">
+                <Lock className="w-4 h-4 text-amber-600 dark:text-amber-400 shrink-0 mt-0.5" />
+                <div className="space-y-1">
+                  <div
+                    className={`font-bold text-amber-950 dark:text-amber-100 ${
+                      language === 'ur' ? 'font-urdu' : ''
+                    }`}
+                  >
+                    {language === 'ur'
+                      ? 'گٹ ہب ریپوزٹری ابھی Private ہے (HTTP 404 کی وجہ)'
+                      : 'GitHub Repository is Set to Private'}
+                  </div>
+                  <p className={language === 'ur' ? 'font-urdu' : ''}>
+                    {language === 'ur'
+                      ? `آپ کی ریپوزٹری (${activeRepo}) اس وقت Private ہے جس کی وجہ سے GitHub آٹو اپڈیٹ کو بلاک (404) کرتا ہے۔ صرف ایک بار GitHub Settings میں جا کر Visibility کو Public کر دیں — اس کے بعد ہر اپڈیٹ ہمیشہ خودکار انسٹال ہو گی۔`
+                      : `Your GitHub repo (${activeRepo}) is currently Private, so GitHub blocks phone auto-updates with HTTP 404. Switch repo visibility to Public once in GitHub Settings — then 1-tap auto-update works immediately.`}
+                  </p>
+                </div>
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 pt-0.5">
+                {nativeAndroid ? (
+                  <button
+                    type="button"
+                    onClick={handleOpenRepoSettings}
+                    className="min-h-[44px] px-3 py-2 rounded-lg bg-amber-600 hover:bg-amber-700 text-white text-xs font-semibold flex items-center justify-center gap-1.5 transition-colors cursor-pointer whitespace-nowrap"
+                  >
+                    <ExternalLink className="w-3.5 h-3.5 shrink-0" />
+                    <span className={language === 'ur' ? 'font-urdu' : ''}>
+                      {language === 'ur'
+                        ? 'GitHub سیٹنگز کھولیں'
+                        : 'Open Repo Settings'}
+                    </span>
+                  </button>
+                ) : (
+                  <a
+                    href={repoUrls.repoSettingsUrl}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="min-h-[44px] px-3 py-2 rounded-lg bg-amber-600 hover:bg-amber-700 text-white text-xs font-semibold flex items-center justify-center gap-1.5 transition-colors cursor-pointer whitespace-nowrap"
+                  >
+                    <ExternalLink className="w-3.5 h-3.5 shrink-0" />
+                    <span className={language === 'ur' ? 'font-urdu' : ''}>
+                      {language === 'ur'
+                        ? 'GitHub سیٹنگز کھولیں'
+                        : 'Open Repo Settings'}
+                    </span>
+                  </a>
+                )}
+
+                <button
+                  type="button"
+                  onClick={checkLatestUpdate}
+                  className="min-h-[44px] px-3 py-2 rounded-lg bg-white dark:bg-[#0D1E16] border border-amber-300 dark:border-amber-700/70 hover:bg-amber-100/60 dark:hover:bg-amber-900/30 text-amber-950 dark:text-amber-100 text-xs font-semibold flex items-center justify-center gap-1.5 transition-colors cursor-pointer whitespace-nowrap"
+                >
+                  <RefreshCw className="w-3.5 h-3.5 shrink-0" />
+                  <span className={language === 'ur' ? 'font-urdu' : ''}>
+                    {language === 'ur'
+                      ? 'Public کر کے دوبارہ چیک کریں'
+                      : 'Re-check Update'}
+                  </span>
+                </button>
+              </div>
+            </div>
+          )}
+
+          {/* Native OTA / APK Error Notice (Only when NOT Private Repo) */}
+          {!isPrivateRepo && otaStatus === 'error' && otaError && (
             <div className="flex items-start gap-2.5 p-3.5 rounded-xl bg-rose-50 dark:bg-rose-950/40 border border-rose-200 dark:border-rose-800/60 text-rose-800 dark:text-rose-200 text-xs">
               <AlertCircle className="w-4 h-4 text-rose-600 dark:text-rose-400 shrink-0 mt-0.5" />
               <span>{otaError}</span>
@@ -435,56 +616,63 @@ export const UpdatesModal: React.FC<UpdatesModalProps> = ({
           )}
 
           {/* Version Check Status */}
-          {!isBusyUpdating && otaStatus !== 'permission_needed' && (
-            <>
-              {checking ? (
-                <div className="flex items-center gap-2.5 p-3.5 rounded-xl bg-slate-50 dark:bg-[#13291F] text-slate-700 dark:text-slate-200 text-xs font-medium">
-                  <RefreshCw className="w-4 h-4 text-[#15803D] dark:text-emerald-400 animate-spin shrink-0" />
-                  <span className={language === 'ur' ? 'font-urdu' : ''}>
-                    {language === 'ur'
-                      ? 'نئی اپڈیٹ چیک کی جا رہی ہے...'
-                      : 'Checking for new SKP VPN updates...'}
-                  </span>
-                </div>
-              ) : checkError ? (
-                <div className="flex items-start gap-2.5 p-3.5 rounded-xl bg-amber-50 dark:bg-amber-950/40 border border-amber-200 dark:border-amber-800/60 text-amber-900 dark:text-amber-200 text-xs">
-                  <AlertCircle className="w-4 h-4 text-amber-600 dark:text-amber-400 shrink-0 mt-0.5" />
-                  <span className={language === 'ur' ? 'font-urdu' : ''}>
-                    {checkError}
-                  </span>
-                </div>
-              ) : isUpToDate ? (
-                <div className="flex items-center gap-2.5 p-3.5 rounded-xl bg-emerald-50 dark:bg-emerald-950/40 border border-emerald-200 dark:border-emerald-800/60 text-emerald-900 dark:text-emerald-200 text-xs font-medium">
-                  <CheckCircle2 className="w-4 h-4 text-[#15803D] dark:text-emerald-400 shrink-0" />
-                  <span className={language === 'ur' ? 'font-urdu' : ''}>
-                    {language === 'ur'
-                      ? `آپ کی ایپ تازہ ترین ورژن (v1.${releaseInfo?.buildNumber}.0) پر اپڈیٹ ہے!`
-                      : `SKP VPN is up to date (v1.${releaseInfo?.buildNumber}.0).`}
-                  </span>
-                </div>
-              ) : isNewerAvailable ? (
-                <div className="flex items-start gap-2.5 p-3.5 rounded-xl bg-emerald-50 dark:bg-emerald-950/40 border border-emerald-200 dark:border-emerald-800/60 text-emerald-900 dark:text-emerald-200 text-xs font-medium">
-                  <ArrowUpCircle className="w-4 h-4 text-[#15803D] dark:text-emerald-400 shrink-0 mt-0.5" />
-                  <div className="space-y-0.5">
-                    <div
-                      className={`font-bold text-[#0B5D32] dark:text-emerald-300 ${
-                        language === 'ur' ? 'font-urdu' : ''
-                      }`}
-                    >
+          {!isBusyUpdating &&
+            !isPrivateRepo &&
+            otaStatus !== 'permission_needed' && (
+              <>
+                {checking ? (
+                  <div className="flex items-center gap-2.5 p-3.5 rounded-xl bg-slate-50 dark:bg-[#13291F] text-slate-700 dark:text-slate-200 text-xs font-medium">
+                    <RefreshCw className="w-4 h-4 text-[#15803D] dark:text-emerald-400 animate-spin shrink-0" />
+                    <span className={language === 'ur' ? 'font-urdu' : ''}>
                       {language === 'ur'
-                        ? `نئی اپڈیٹ دستیاب ہے: v1.${releaseInfo?.buildNumber}.0`
-                        : `New Update Ready: v1.${releaseInfo?.buildNumber}.0`}
-                    </div>
-                    {releaseInfo?.apkSizeBytes && (
-                      <div className="text-[11px] text-emerald-700 dark:text-emerald-400 font-mono-tabular">
-                        Package size · {formatBytesCompact(releaseInfo.apkSizeBytes)}
-                      </div>
-                    )}
+                        ? 'نئی اپڈیٹ چیک کی جا رہی ہے...'
+                        : 'Checking for new SKP VPN updates...'}
+                    </span>
                   </div>
-                </div>
-              ) : null}
-            </>
-          )}
+                ) : checkError && otaStatus !== 'error' ? (
+                  <div className="flex items-start gap-2.5 p-3.5 rounded-xl bg-amber-50 dark:bg-amber-950/40 border border-amber-200 dark:border-amber-800/60 text-amber-900 dark:text-amber-200 text-xs">
+                    <AlertCircle className="w-4 h-4 text-amber-600 dark:text-amber-400 shrink-0 mt-0.5" />
+                    <span className={language === 'ur' ? 'font-urdu' : ''}>
+                      {checkError}
+                    </span>
+                  </div>
+                ) : isUpToDate ? (
+                  <div className="flex items-center gap-2.5 p-3.5 rounded-xl bg-emerald-50 dark:bg-emerald-950/40 border border-emerald-200 dark:border-emerald-800/60 text-emerald-900 dark:text-emerald-200 text-xs font-medium">
+                    <CheckCircle2 className="w-4 h-4 text-[#15803D] dark:text-emerald-400 shrink-0" />
+                    <span className={language === 'ur' ? 'font-urdu' : ''}>
+                      {language === 'ur'
+                        ? `آپ کی ایپ تازہ ترین ورژن (v1.${
+                            releaseInfo?.buildNumber ?? currentBuildNumber ?? 1
+                          }.0) پر اپڈیٹ ہے!`
+                        : `SKP VPN is up to date (v1.${
+                            releaseInfo?.buildNumber ?? currentBuildNumber ?? 1
+                          }.0).`}
+                    </span>
+                  </div>
+                ) : isNewerAvailable ? (
+                  <div className="flex items-start gap-2.5 p-3.5 rounded-xl bg-emerald-50 dark:bg-emerald-950/40 border border-emerald-200 dark:border-emerald-800/60 text-emerald-900 dark:text-emerald-200 text-xs font-medium">
+                    <ArrowUpCircle className="w-4 h-4 text-[#15803D] dark:text-emerald-400 shrink-0 mt-0.5" />
+                    <div className="space-y-0.5">
+                      <div
+                        className={`font-bold text-[#0B5D32] dark:text-emerald-300 ${
+                          language === 'ur' ? 'font-urdu' : ''
+                        }`}
+                      >
+                        {language === 'ur'
+                          ? `نئی اپڈیٹ دستیاب ہے: v1.${releaseInfo?.buildNumber}.0`
+                          : `New Update Ready: v1.${releaseInfo?.buildNumber}.0`}
+                      </div>
+                      {releaseInfo?.apkSizeBytes && (
+                        <div className="text-[11px] text-emerald-700 dark:text-emerald-400 font-mono-tabular">
+                          Package size ·{' '}
+                          {formatBytesCompact(releaseInfo.apkSizeBytes)}
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                ) : null}
+              </>
+            )}
 
           {/* In-App Update Action Buttons */}
           <div className="flex flex-col gap-2.5 pt-1">
