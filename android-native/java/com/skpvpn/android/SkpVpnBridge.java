@@ -123,6 +123,7 @@ public class SkpVpnBridge {
     private volatile int otaProgress = 0;
     private volatile String otaError = "";
     private volatile String otaErrorCode = "";
+    private volatile boolean bannerAdLoaded = false;
     private volatile File pendingApkInstallFile = null;
     private volatile long lastOtaCheckMs = 0L;
 
@@ -1287,6 +1288,21 @@ public class SkpVpnBridge {
     }
 
     @JavascriptInterface
+    public void setBannerAdVisible(String adUnitId, boolean visible) {
+        MainActivity activity = activityRef != null ? activityRef.get() : null;
+        if (activity != null) {
+            activity.updateBottomBannerAd(adUnitId, visible);
+        }
+    }
+
+    public void setBannerAdLoaded(boolean loaded) {
+        if (this.bannerAdLoaded != loaded) {
+            this.bannerAdLoaded = loaded;
+            emitCurrentState();
+        }
+    }
+
+    @JavascriptInterface
     public void openExternalUrl(String url) {
         if (url == null || url.isEmpty()) return;
         MainActivity activity = activityRef != null ? activityRef.get() : null;
@@ -1803,6 +1819,7 @@ public class SkpVpnBridge {
             obj.put("otaErrorCode", otaErrorCode);
             obj.put("githubRepo", getEffectiveRepo());
             obj.put("installedBuild", getInstalledBuildNumber());
+            obj.put("bannerAdLoaded", bannerAdLoaded);
             long durSec = ("CONNECTED".equals(currentState) && connectedSinceMs > 0L)
                 ? Math.max(0L, (System.currentTimeMillis() - connectedSinceMs) / 1000L)
                 : 0L;

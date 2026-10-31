@@ -19,6 +19,7 @@ interface SkpNativeVpnInterface {
   triggerOtaUpdateCheck?: () => void;
   downloadAndInstallApk?: (apkUrl: string) => void;
   installDownloadedApkIfReady?: () => void;
+  setBannerAdVisible?: (adUnitId: string, visible: boolean) => void;
 }
 
 declare global {
@@ -241,6 +242,24 @@ export function subscribeNativeVpnEvents(
   return () => {
     listeners.delete(listener);
   };
+}
+
+export function syncNativeBannerAd(
+  adUnitId: string,
+  visible: boolean
+): boolean {
+  if (
+    !isNativeAndroidVpn() ||
+    typeof window.SkpNativeVpn?.setBannerAdVisible !== 'function'
+  ) {
+    return false;
+  }
+  try {
+    window.SkpNativeVpn.setBannerAdVisible(adUnitId, visible);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 export function formatBytesCompact(bytes: number): string {

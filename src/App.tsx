@@ -3,7 +3,14 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import React, {
+  Suspense,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from 'react';
 import {
   Menu,
   ThumbsUp,
@@ -59,14 +66,73 @@ import {
 import { DrawerMenu } from './components/DrawerMenu';
 import { UpdatesModal } from './components/UpdatesModal';
 
+const LazyFooterBannerAd = React.lazy(
+  () => import('./components/FooterBannerAd')
+);
+
+const FOOTER_ADMOB_UNIT_ID = 'ca-app-pub-9297540107285222/7061748625';
 const LAST_SERVER_STORAGE_KEY = 'skp_vpn_last_server_id';
 const AUTO_RECONNECT_STORAGE_KEY = 'skp_vpn_auto_reconnect';
 const DARK_MODE_STORAGE_KEY = 'skp_vpn_dark_mode';
 const THEME_3D_STORAGE_KEY = 'skp_vpn_3d_theme';
 const BATTERY_BANNER_STORAGE_KEY = 'skp_vpn_show_battery_banner';
 const SESSION_ALERT_STORAGE_KEY = 'skp_vpn_session_alert';
+const RECONNECT_LOGS_STORAGE_KEY = 'skp_vpn_reconnect_logs';
+const RECONNECT_LOG_RETENTION_MS = 24 * 60 * 60 * 1000;
+const RECONNECT_LOG_CLEANUP_INTERVAL_MS = 60 * 1000;
+const MAX_RECONNECT_LOG_ITEMS = 15;
 const MAX_RECONNECT_ATTEMPTS = 5;
 const BACKOFF_SECONDS = [2, 3, 5, 8, 12];
+
+function resolveReconnectLogCreatedAtMs(
+  entry: Partial<ReconnectLogEntry>
+): number {
+  if (
+    typeof entry.createdAtMs === 'number' &&
+    Number.isFinite(entry.createdAtMs) &&
+    entry.createdAtMs > 0
+  ) {
+    return entry.createdAtMs;
+  }
+  if (typeof entry.id === 'string') {
+    const prefixMatch = entry.id.match(/^(\d{10,})/);
+    if (prefixMatch) {
+      const parsed = Number(prefixMatch[1]);
+      if (Number.isFinite(parsed)) {
+        return parsed;
+      }
+    }
+  }
+  return 0;
+}
+
+function cleanupExpiredReconnectLogs(
+  logs: ReconnectLogEntry[],
+  nowMs: number = Date.now()
+): ReconnectLogEntry[] {
+  if (!Array.isArray(logs) || logs.length === 0) {
+    return [];
+  }
+  return logs
+    .filter((entry) => {
+      if (!entry || typeof entry !== 'object') return false;
+      const createdMs = resolveReconnectLogCreatedAtMs(entry);
+      return createdMs > 0 && nowMs - createdMs < RECONNECT_LOG_RETENTION_MS;
+    })
+    .slice(0, MAX_RECONNECT_LOG_ITEMS);
+}
+
+function loadInitialReconnectLogs(): ReconnectLogEntry[] {
+  try {
+    const raw = window.localStorage.getItem(RECONNECT_LOGS_STORAGE_KEY);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+    return cleanupExpiredReconnectLogs(parsed as ReconnectLogEntry[]);
+  } catch {
+    return [];
+  }
+}
 
 const COLO_TO_SERVER_ID: Record<string, string> = {
   KHI: 'pk-khi',
@@ -283,6 +349,9 @@ export default function App() {
   const [otaError, setOtaError] = useState<string>('');
   const [otaErrorCode, setOtaErrorCode] = useState<string>('');
   const [otaGithubRepo, setOtaGithubRepo] = useState<string>('');
+  const [bannerAdLoaded, setBannerAdLoaded] = useState<boolean>(false);
+  const [initialRenderComplete, setInitialRenderComplete] =
+    useState<boolean>(false);
 
   // Auto-reconnect runtime state
   const [reconnectAttempt, setReconnectAttempt] = useState<number>(0);
@@ -295,7 +364,9 @@ export default function App() {
   const [recoveryBannerMessage, setRecoveryBannerMessage] = useState<
     string | null
   >(null);
-  const [reconnectLogs, setReconnectLogs] = useState<ReconnectLogEntry[]>([]);
+  const [reconnectLogs, setReconnectLogs] = useState<ReconnectLogEntry[]>(
+    loadInitialReconnectLogs
+  );
 
   const [language, setLanguage] = useState<Language>('en');
   const [protocol, setProtocol] = useState<VpnProtocol>(VpnProtocol.Auto);
@@ -494,6 +565,8 @@ export default function App() {
         setOtaErrorCode(payload.otaErrorCode);
       if (payload.githubRepo !== undefined)
         setOtaGithubRepo(payload.githubRepo);
+      if (typeof payload.bannerAdLoaded === 'boolean')
+        setBannerAdLoaded(payload.bannerAdLoaded);
 
       if (payload.serverId) {
         const matched = SERVER_LOCATIONS.find((s) => s.id === payload.serverId);
@@ -612,22 +685,29 @@ export default function App() {
         setStatus(ConnectionStatus.Disconnected);
         setReconnectHandshakeActive(false);
         setReconnectCountdown(0);
-        setReconnectLogs((prev) => [
-          {
-            id: `${Date.now()}-fail`,
-            serverNameEn: targetServer.nameEn,
-            serverNameUr: targetServer.nameUr,
-            reason,
-            attempts: MAX_RECONNECT_ATTEMPTS,
-            outcome: 'failed',
-            timestamp: new Date().toLocaleTimeString([], {
-              hour: '2-digit',
-              minute: '2-digit',
-              second: '2-digit',
-            }),
-          },
-          ...prev.slice(0, 4),
-        ]);
+        const nowMs = Date.now();
+        setReconnectLogs((prev) =>
+          cleanupExpiredReconnectLogs(
+            [
+              {
+                id: `${nowMs}-fail`,
+                serverNameEn: targetServer.nameEn,
+                serverNameUr: targetServer.nameUr,
+                reason,
+                attempts: MAX_RECONNECT_ATTEMPTS,
+                outcome: 'failed',
+                timestamp: new Date(nowMs).toLocaleTimeString([], {
+                  hour: '2-digit',
+                  minute: '2-digit',
+                  second: '2-digit',
+                }),
+                createdAtMs: nowMs,
+              },
+              ...prev,
+            ],
+            nowMs
+          )
+        );
         return;
       }
 
@@ -688,24 +768,31 @@ export default function App() {
                 ? pickOptimalConcreteServer()
                 : targetServer;
 
-            const timestamp = new Date().toLocaleTimeString([], {
+            const nowMs = Date.now();
+            const timestamp = new Date(nowMs).toLocaleTimeString([], {
               hour: '2-digit',
               minute: '2-digit',
               second: '2-digit',
             });
 
-            setReconnectLogs((prev) => [
-              {
-                id: `${Date.now()}-ok`,
-                serverNameEn: connectedDisplay.nameEn,
-                serverNameUr: connectedDisplay.nameUr,
-                reason,
-                attempts: attemptNumber,
-                outcome: 'recovered',
-                timestamp,
-              },
-              ...prev.slice(0, 4),
-            ]);
+            setReconnectLogs((prev) =>
+              cleanupExpiredReconnectLogs(
+                [
+                  {
+                    id: `${nowMs}-ok`,
+                    serverNameEn: connectedDisplay.nameEn,
+                    serverNameUr: connectedDisplay.nameUr,
+                    reason,
+                    attempts: attemptNumber,
+                    outcome: 'recovered',
+                    timestamp,
+                    createdAtMs: nowMs,
+                  },
+                  ...prev,
+                ],
+                nowMs
+              )
+            );
 
             setRecoveryBannerMessage(
               `Restored tunnel to ${connectedDisplay.nameEn} (${timestamp})`
@@ -806,24 +893,31 @@ export default function App() {
           ? pickOptimalConcreteServer()
           : lastUsedServer;
 
-      const timestamp = new Date().toLocaleTimeString([], {
+      const nowMs = Date.now();
+      const timestamp = new Date(nowMs).toLocaleTimeString([], {
         hour: '2-digit',
         minute: '2-digit',
         second: '2-digit',
       });
 
-      setReconnectLogs((prev) => [
-        {
-          id: `${Date.now()}-ok`,
-          serverNameEn: connectedDisplay.nameEn,
-          serverNameUr: connectedDisplay.nameUr,
-          reason: dropReason ?? 'tunnel_drop',
-          attempts: currentAttempt,
-          outcome: 'recovered',
-          timestamp,
-        },
-        ...prev.slice(0, 4),
-      ]);
+      setReconnectLogs((prev) =>
+        cleanupExpiredReconnectLogs(
+          [
+            {
+              id: `${nowMs}-ok`,
+              serverNameEn: connectedDisplay.nameEn,
+              serverNameUr: connectedDisplay.nameUr,
+              reason: dropReason ?? 'tunnel_drop',
+              attempts: currentAttempt,
+              outcome: 'recovered',
+              timestamp,
+              createdAtMs: nowMs,
+            },
+            ...prev,
+          ],
+          nowMs
+        )
+      );
 
       setRecoveryBannerMessage(
         `Restored tunnel to ${connectedDisplay.nameEn} (${timestamp})`
@@ -841,6 +935,67 @@ export default function App() {
     saveLastUsedServer,
     status,
   ]);
+
+  // Defer footer advertisement mount until after initial UI render & paint complete
+  useEffect(() => {
+    let timerId: number | null = null;
+    const rafId = window.requestAnimationFrame(() => {
+      timerId = window.setTimeout(() => {
+        setInitialRenderComplete(true);
+      }, 150);
+    });
+    return () => {
+      window.cancelAnimationFrame(rafId);
+      if (timerId !== null) {
+        window.clearTimeout(timerId);
+      }
+    };
+  }, []);
+
+  // Auto-cleanup reconnectLogs older than 24 hours to keep UI clean & optimize memory
+  const pruneExpiredLogsState = useCallback(() => {
+    setReconnectLogs((prev) => {
+      if (prev.length === 0) return prev;
+      const cleaned = cleanupExpiredReconnectLogs(prev, Date.now());
+      return cleaned.length === prev.length ? prev : cleaned;
+    });
+  }, []);
+
+  useEffect(() => {
+    pruneExpiredLogsState();
+    const cleanupTimer = window.setInterval(
+      pruneExpiredLogsState,
+      RECONNECT_LOG_CLEANUP_INTERVAL_MS
+    );
+    const onVisibilityChange = () => {
+      if (document.visibilityState === 'visible') {
+        pruneExpiredLogsState();
+      }
+    };
+    document.addEventListener('visibilitychange', onVisibilityChange);
+    window.addEventListener('focus', pruneExpiredLogsState);
+
+    return () => {
+      window.clearInterval(cleanupTimer);
+      document.removeEventListener('visibilitychange', onVisibilityChange);
+      window.removeEventListener('focus', pruneExpiredLogsState);
+    };
+  }, [pruneExpiredLogsState]);
+
+  useEffect(() => {
+    try {
+      if (reconnectLogs.length === 0) {
+        window.localStorage.removeItem(RECONNECT_LOGS_STORAGE_KEY);
+      } else {
+        window.localStorage.setItem(
+          RECONNECT_LOGS_STORAGE_KEY,
+          JSON.stringify(reconnectLogs)
+        );
+      }
+    } catch {
+      // Ignore storage quota or restricted context errors
+    }
+  }, [reconnectLogs]);
 
   useEffect(() => {
     const onOffline = () => {
@@ -1884,6 +2039,26 @@ export default function App() {
           </section>
         </div>
       </main>
+
+      {/* Deferred Bottom Footer Banner Ad (Mounts only after initial UI render completes) */}
+      <footer className="w-full px-4 pb-4 pt-1 mt-auto">
+        {initialRenderComplete && (
+          <Suspense fallback={null}>
+            <LazyFooterBannerAd
+              adUnitId={FOOTER_ADMOB_UNIT_ID}
+              language={language}
+              overlayOpen={
+                drawerOpen ||
+                serverModalOpen ||
+                supportModalOpen ||
+                speedModalOpen ||
+                updatesModalOpen
+              }
+              nativeAdLoaded={bannerAdLoaded}
+            />
+          </Suspense>
+        )}
+      </footer>
 
       {/* Modals & Drawers */}
       <DrawerMenu

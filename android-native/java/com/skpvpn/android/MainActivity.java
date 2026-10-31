@@ -5,16 +5,32 @@ import android.content.Intent;
 import android.content.pm.PackageManager;
 import android.os.Build;
 import android.os.Bundle;
+import android.view.Gravity;
+import android.view.View;
+import android.view.ViewGroup;
 import android.webkit.WebSettings;
 import android.webkit.WebView;
+import android.widget.FrameLayout;
+import androidx.annotation.NonNull;
 import com.getcapacitor.BridgeActivity;
+import com.google.android.gms.ads.AdListener;
+import com.google.android.gms.ads.AdRequest;
+import com.google.android.gms.ads.AdSize;
+import com.google.android.gms.ads.AdView;
+import com.google.android.gms.ads.LoadAdError;
+import com.google.android.gms.ads.MobileAds;
 import java.io.File;
 
 public class MainActivity extends BridgeActivity {
     public static final int VPN_PERMISSION_REQUEST_CODE = 7910;
     private static final int NOTIFICATION_PERMISSION_REQUEST_CODE = 7911;
+    private static final String DEFAULT_BANNER_AD_UNIT_ID = "ca-app-pub-9297540107285222/7061748625";
 
     private SkpVpnBridge vpnBridge;
+    private boolean mobileAdsInitialized = false;
+    private FrameLayout bannerAdContainer;
+    private AdView bottomAdView;
+    private String activeBannerUnitId = "";
 
     @Override
     public void onCreate(Bundle savedInstanceState) {
@@ -43,6 +59,17 @@ public class MainActivity extends BridgeActivity {
     }
 
     @Override
+    public void onPause() {
+        try {
+            if (bottomAdView != null) {
+                bottomAdView.pause();
+            }
+        } catch (Throwable ignored) {
+        }
+        super.onPause();
+    }
+
+    @Override
     public void onResume() {
         super.onResume();
         if (vpnBridge != null) {
@@ -52,6 +79,114 @@ public class MainActivity extends BridgeActivity {
             vpnBridge.emitCurrentState();
             vpnBridge.checkForOtaUpdateAsync(false);
         }
+        try {
+            if (bottomAdView != null && bannerAdContainer != null && bannerAdContainer.getVisibility() == View.VISIBLE) {
+                bottomAdView.resume();
+            }
+        } catch (Throwable ignored) {
+        }
+    }
+
+    @Override
+    public void onDestroy() {
+        try {
+            if (bottomAdView != null) {
+                bottomAdView.destroy();
+                bottomAdView = null;
+            }
+            bannerAdContainer = null;
+        } catch (Throwable ignored) {
+        }
+        super.onDestroy();
+    }
+
+    public void updateBottomBannerAd(final String requestedUnitId, final boolean visible) {
+        runOnUiThread(() -> {
+            try {
+                if (!visible) {
+                    if (bannerAdContainer != null) {
+                        bannerAdContainer.setVisibility(View.GONE);
+                    }
+                    if (bottomAdView != null) {
+                        bottomAdView.pause();
+                    }
+                    return;
+                }
+
+                final String unitId = (requestedUnitId != null && requestedUnitId.contains("/"))
+                    ? requestedUnitId.trim()
+                    : DEFAULT_BANNER_AD_UNIT_ID;
+
+                if (!mobileAdsInitialized) {
+                    mobileAdsInitialized = true;
+                    MobileAds.initialize(getApplicationContext(), initializationStatus -> {});
+                }
+
+                ViewGroup rootContent = findViewById(android.R.id.content);
+                if (rootContent == null) {
+                    return;
+                }
+
+                if (bannerAdContainer == null) {
+                    bannerAdContainer = new FrameLayout(this);
+                    FrameLayout.LayoutParams params = new FrameLayout.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT,
+                        ViewGroup.LayoutParams.WRAP_CONTENT,
+                        Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL
+                    );
+                    rootContent.addView(bannerAdContainer, params);
+                }
+
+                if (bottomAdView == null || !unitId.equals(activeBannerUnitId)) {
+                    if (bottomAdView != null) {
+                        try {
+                            bannerAdContainer.removeView(bottomAdView);
+                            bottomAdView.destroy();
+                        } catch (Throwable ignored) {
+                        }
+                    }
+
+                    activeBannerUnitId = unitId;
+                    bottomAdView = new AdView(this);
+                    bottomAdView.setAdSize(AdSize.BANNER);
+                    bottomAdView.setAdUnitId(unitId);
+                    bottomAdView.setAdListener(new AdListener() {
+                        @Override
+                        public void onAdLoaded() {
+                            if (bannerAdContainer != null) {
+                                bannerAdContainer.setVisibility(View.VISIBLE);
+                            }
+                            if (vpnBridge != null) {
+                                vpnBridge.setBannerAdLoaded(true);
+                            }
+                        }
+
+                        @Override
+                        public void onAdFailedToLoad(@NonNull LoadAdError loadAdError) {
+                            if (vpnBridge != null) {
+                                vpnBridge.setBannerAdLoaded(false);
+                            }
+                        }
+                    });
+
+                    FrameLayout.LayoutParams adParams = new FrameLayout.LayoutParams(
+                        ViewGroup.LayoutParams.WRAP_CONTENT,
+                        ViewGroup.LayoutParams.WRAP_CONTENT,
+                        Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL
+                    );
+                    bannerAdContainer.addView(bottomAdView, adParams);
+                    bannerAdContainer.setVisibility(View.VISIBLE);
+                    bottomAdView.loadAd(new AdRequest.Builder().build());
+                } else {
+                    bannerAdContainer.setVisibility(View.VISIBLE);
+                    bottomAdView.resume();
+                }
+            } catch (Throwable ignored) {
+                if (vpnBridge != null) {
+                    vpnBridge.setBannerAdLoaded(false);
+                }
+            }
+        });
     }
 
     public void applyOtaServerBasePath(final String basePath) {

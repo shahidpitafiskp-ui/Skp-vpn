@@ -54,6 +54,7 @@ export interface ReconnectLogEntry {
   attempts: number;
   outcome: 'recovered' | 'failed';
   timestamp: string;
+  createdAtMs: number;
 }
 
 export interface NativeVpnEventPayload {
@@ -90,6 +91,7 @@ export interface NativeVpnEventPayload {
   otaErrorCode?: string;
   githubRepo?: string;
   installedBuild?: number;
+  bannerAdLoaded?: boolean;
 }
 
 export interface SessionAlertConfig {
