@@ -20,6 +20,13 @@ interface SkpNativeVpnInterface {
   downloadAndInstallApk?: (apkUrl: string) => void;
   installDownloadedApkIfReady?: () => void;
   setBannerAdVisible?: (adUnitId: string, visible: boolean) => void;
+  updateBannerAdSlot?: (
+    adUnitId: string,
+    xCssPx: number,
+    yCssPx: number,
+    widthCssPx: number,
+    visible: boolean
+  ) => void;
 }
 
 declare global {
@@ -244,6 +251,14 @@ export function subscribeNativeVpnEvents(
   };
 }
 
+export function hasNativeBannerAdSupport(): boolean {
+  return Boolean(
+    isNativeAndroidVpn() &&
+      (typeof window.SkpNativeVpn?.updateBannerAdSlot === 'function' ||
+        typeof window.SkpNativeVpn?.setBannerAdVisible === 'function')
+  );
+}
+
 export function syncNativeBannerAd(
   adUnitId: string,
   visible: boolean
@@ -260,6 +275,37 @@ export function syncNativeBannerAd(
   } catch {
     return false;
   }
+}
+
+export function syncNativeBannerAdSlot(
+  adUnitId: string,
+  xCssPx: number,
+  yCssPx: number,
+  widthCssPx: number,
+  visible: boolean
+): boolean {
+  if (!isNativeAndroidVpn()) {
+    return false;
+  }
+  try {
+    if (typeof window.SkpNativeVpn?.updateBannerAdSlot === 'function') {
+      window.SkpNativeVpn.updateBannerAdSlot(
+        adUnitId,
+        xCssPx,
+        yCssPx,
+        widthCssPx,
+        visible
+      );
+      return true;
+    }
+    if (typeof window.SkpNativeVpn?.setBannerAdVisible === 'function') {
+      window.SkpNativeVpn.setBannerAdVisible(adUnitId, visible);
+      return true;
+    }
+  } catch {
+    // Ignore bridge errors on older APKs
+  }
+  return false;
 }
 
 export function formatBytesCompact(bytes: number): string {

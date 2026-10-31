@@ -124,6 +124,8 @@ public class SkpVpnBridge {
     private volatile String otaError = "";
     private volatile String otaErrorCode = "";
     private volatile boolean bannerAdLoaded = false;
+    private volatile int bannerAdHeightDp = 0;
+    private volatile String bannerAdStatus = "idle";
     private volatile File pendingApkInstallFile = null;
     private volatile long lastOtaCheckMs = 0L;
 
@@ -1295,9 +1297,34 @@ public class SkpVpnBridge {
         }
     }
 
+    @JavascriptInterface
+    public void updateBannerAdSlot(
+        String adUnitId,
+        float xCssPx,
+        float yCssPx,
+        float widthCssPx,
+        boolean visible
+    ) {
+        MainActivity activity = activityRef != null ? activityRef.get() : null;
+        if (activity != null) {
+            activity.updateInlineBannerAd(adUnitId, xCssPx, yCssPx, widthCssPx, visible);
+        }
+    }
+
     public void setBannerAdLoaded(boolean loaded) {
-        if (this.bannerAdLoaded != loaded) {
-            this.bannerAdLoaded = loaded;
+        setBannerAdState(loaded, loaded ? 54 : 0, loaded ? "loaded" : "no_fill");
+    }
+
+    public void setBannerAdState(boolean loaded, int heightDp, String status) {
+        String safeStatus = (status != null && !status.isEmpty()) ? status : "idle";
+        boolean changed =
+            this.bannerAdLoaded != loaded ||
+            this.bannerAdHeightDp != heightDp ||
+            !safeStatus.equals(this.bannerAdStatus);
+        this.bannerAdLoaded = loaded;
+        this.bannerAdHeightDp = heightDp;
+        this.bannerAdStatus = safeStatus;
+        if (changed) {
             emitCurrentState();
         }
     }
@@ -1425,6 +1452,13 @@ public class SkpVpnBridge {
                 statusDetail = "WireGuard System VPN Active";
                 showConnectedNotification(serverName, activeEndpoint);
                 emitCurrentState();
+
+                if (!bannerAdLoaded) {
+                    MainActivity act = activityRef != null ? activityRef.get() : null;
+                    if (act != null) {
+                        act.retryBannerAdIfNeeded();
+                    }
+                }
 
                 final boolean usedFallback = !creds.dedicated;
                 Executors.newSingleThreadExecutor().execute(() -> {
@@ -1820,6 +1854,8 @@ public class SkpVpnBridge {
             obj.put("githubRepo", getEffectiveRepo());
             obj.put("installedBuild", getInstalledBuildNumber());
             obj.put("bannerAdLoaded", bannerAdLoaded);
+            obj.put("bannerAdHeightDp", bannerAdHeightDp);
+            obj.put("bannerAdStatus", bannerAdStatus);
             long durSec = ("CONNECTED".equals(currentState) && connectedSinceMs > 0L)
                 ? Math.max(0L, (System.currentTimeMillis() - connectedSinceMs) / 1000L)
                 : 0L;

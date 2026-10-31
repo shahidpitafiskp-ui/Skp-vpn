@@ -1,6 +1,9 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Language } from '../types/vpn';
-import { isNativeAndroidVpn, syncNativeBannerAd } from '../utils/nativeVpn';
+import {
+  hasNativeBannerAdSupport,
+  syncNativeBannerAdSlot,
+} from '../utils/nativeVpn';
 
 declare global {
   interface Window {
@@ -13,6 +16,8 @@ export interface FooterBannerAdProps {
   language: Language;
   overlayOpen?: boolean;
   nativeAdLoaded?: boolean;
+  nativeAdHeightDp?: number;
+  nativeAdStatus?: 'idle' | 'loading' | 'loaded' | 'no_fill';
 }
 
 function parseAdMobUnit(adUnitId: string): {
@@ -38,32 +43,154 @@ export const FooterBannerAd: React.FC<FooterBannerAdProps> = ({
   language,
   overlayOpen = false,
   nativeAdLoaded = false,
+  nativeAdHeightDp = 54,
+  nativeAdStatus = 'idle',
 }) => {
-  const nativeAndroid = isNativeAndroidVpn();
+  const nativeBannerSupported = hasNativeBannerAdSupport();
   const { adClient, adSlot } = useMemo(
     () => parseAdMobUnit(adUnitId),
     [adUnitId]
   );
 
+  const slotRef = useRef<HTMLDivElement | null>(null);
+  const insRef = useRef<HTMLModElement | null>(null);
   const pushedSlotRef = useRef<boolean>(false);
-  const [webAdReady, setWebAdReady] = useState<boolean>(false);
+  const rafSyncRef = useRef<number | null>(null);
 
-  // Native Android: lazily mount & toggle real AdMob bottom AdView after initial UI render completes
-  useEffect(() => {
-    if (!nativeAndroid) return;
-    syncNativeBannerAd(adUnitId, !overlayOpen);
-  }, [nativeAndroid, adUnitId, overlayOpen]);
+  const [initialFetchWindow, setInitialFetchWindow] = useState<boolean>(true);
+  const [webAdFilled, setWebAdFilled] = useState<boolean>(false);
+  const [webAdUnfilled, setWebAdUnfilled] = useState<boolean>(false);
 
+  // Brief initial fetch window for clean loading skeleton before collapsing if no-fill
   useEffect(() => {
-    if (!nativeAndroid) return;
+    const timer = window.setTimeout(() => {
+      setInitialFetchWindow(false);
+    }, 3200);
     return () => {
-      syncNativeBannerAd(adUnitId, false);
+      window.clearTimeout(timer);
     };
-  }, [nativeAndroid, adUnitId]);
+  }, []);
 
-  // Web Preview / PWA: lazily load external Google Ad script during idle time after mount
+  const syncNativePosition = useCallback(() => {
+    if (!nativeBannerSupported) return;
+    const el = slotRef.current;
+    if (!el) return;
+
+    const rect = el.getBoundingClientRect();
+    const viewportHeight =
+      window.innerHeight || document.documentElement.clientHeight || 800;
+    const inViewport =
+      rect.width > 0 && rect.bottom > 4 && rect.top < viewportHeight - 4;
+
+    syncNativeBannerAdSlot(
+      adUnitId,
+      rect.left,
+      rect.top,
+      rect.width,
+      !overlayOpen && inViewport
+    );
+  }, [nativeBannerSupported, adUnitId, overlayOpen]);
+
+  const scheduleNativePositionSync = useCallback(() => {
+    if (!nativeBannerSupported) return;
+    if (rafSyncRef.current !== null) return;
+    rafSyncRef.current = window.requestAnimationFrame(() => {
+      rafSyncRef.current = null;
+      syncNativePosition();
+    });
+  }, [nativeBannerSupported, syncNativePosition]);
+
+  // Native Android: sync inline slot coordinates between Connect Button & Speed Test
   useEffect(() => {
-    if (nativeAndroid || typeof window === 'undefined') return;
+    if (!nativeBannerSupported) return;
+
+    syncNativePosition();
+
+    const onScrollOrResize = () => {
+      scheduleNativePositionSync();
+    };
+
+    window.addEventListener('scroll', onScrollOrResize, {
+      passive: true,
+      capture: true,
+    });
+    window.addEventListener('resize', onScrollOrResize, { passive: true });
+
+    let resizeObserver: ResizeObserver | null = null;
+    if (typeof ResizeObserver !== 'undefined') {
+      resizeObserver = new ResizeObserver(() => {
+        scheduleNativePositionSync();
+      });
+      if (slotRef.current) {
+        resizeObserver.observe(slotRef.current);
+      }
+      if (document.body) {
+        resizeObserver.observe(document.body);
+      }
+    }
+
+    return () => {
+      window.removeEventListener('scroll', onScrollOrResize, {
+        capture: true,
+      });
+      window.removeEventListener('resize', onScrollOrResize);
+      resizeObserver?.disconnect();
+      if (rafSyncRef.current !== null) {
+        window.cancelAnimationFrame(rafSyncRef.current);
+        rafSyncRef.current = null;
+      }
+    };
+  }, [
+    nativeBannerSupported,
+    syncNativePosition,
+    scheduleNativePositionSync,
+    nativeAdLoaded,
+    nativeAdHeightDp,
+  ]);
+
+  // Hide native AdView cleanly on unmount
+  useEffect(() => {
+    if (!nativeBannerSupported) return;
+    return () => {
+      syncNativeBannerAdSlot(adUnitId, 0, 0, 320, false);
+    };
+  }, [nativeBannerSupported, adUnitId]);
+
+  // Observe <ins class="adsbygoogle"> fill status on Web / PWA / non-native fallback
+  useEffect(() => {
+    if (nativeBannerSupported) return;
+    const insEl = insRef.current;
+    if (!insEl || typeof MutationObserver === 'undefined') return;
+
+    const checkAdStatus = () => {
+      const statusAttr = insEl.getAttribute('data-ad-status');
+      if (statusAttr === 'filled') {
+        setWebAdFilled(true);
+        setWebAdUnfilled(false);
+      } else if (statusAttr === 'unfilled') {
+        setWebAdFilled(false);
+        setWebAdUnfilled(true);
+      } else if (insEl.querySelector('iframe')) {
+        setWebAdFilled(true);
+      }
+    };
+
+    checkAdStatus();
+    const observer = new MutationObserver(checkAdStatus);
+    observer.observe(insEl, {
+      attributes: true,
+      childList: true,
+      attributeFilter: ['data-ad-status', 'data-adsbygoogle-status'],
+    });
+
+    return () => {
+      observer.disconnect();
+    };
+  }, [nativeBannerSupported]);
+
+  // Web / PWA: lazily load external Google Ad script during idle time after mount
+  useEffect(() => {
+    if (nativeBannerSupported || typeof window === 'undefined') return;
 
     let cancelled = false;
     const loadAdScriptWhenIdle = () => {
@@ -80,9 +207,8 @@ export const FooterBannerAd: React.FC<FooterBannerAdProps> = ({
           window.adsbygoogle = window.adsbygoogle || [];
           window.adsbygoogle.push({});
           pushedSlotRef.current = true;
-          setWebAdReady(true);
         } catch {
-          setWebAdReady(false);
+          setWebAdUnfilled(true);
         }
       };
 
@@ -95,7 +221,7 @@ export const FooterBannerAd: React.FC<FooterBannerAdProps> = ({
         scriptEl.onload = pushAdRequest;
         scriptEl.onerror = () => {
           if (!cancelled) {
-            setWebAdReady(false);
+            setWebAdUnfilled(true);
           }
         };
         document.head.appendChild(scriptEl);
@@ -114,7 +240,7 @@ export const FooterBannerAd: React.FC<FooterBannerAdProps> = ({
 
     if (typeof winWithIdle.requestIdleCallback === 'function') {
       const idleId = winWithIdle.requestIdleCallback(loadAdScriptWhenIdle, {
-        timeout: 1200,
+        timeout: 1000,
       });
       return () => {
         cancelled = true;
@@ -122,67 +248,75 @@ export const FooterBannerAd: React.FC<FooterBannerAdProps> = ({
       };
     }
 
-    const timerId = window.setTimeout(loadAdScriptWhenIdle, 300);
+    const timerId = window.setTimeout(loadAdScriptWhenIdle, 250);
     return () => {
       cancelled = true;
       window.clearTimeout(timerId);
     };
-  }, [nativeAndroid, adClient]);
+  }, [nativeBannerSupported, adClient]);
 
-  // Reserve clean bottom dock clearance when native Android AdMob AdView is active
-  if (nativeAndroid) {
+  if (nativeBannerSupported) {
+    const showNativeLoading =
+      !nativeAdLoaded &&
+      initialFetchWindow &&
+      nativeAdStatus !== 'no_fill';
+    const showNativeFrame = nativeAdLoaded || showNativeLoading;
+    const tallAdaptive = nativeAdHeightDp > 58;
+
     return (
       <div
-        aria-label="Sponsored banner area"
-        className="w-full max-w-[420px] lg:max-w-[1140px] mx-auto min-h-[58px] flex items-center justify-center"
+        ref={slotRef}
+        aria-label="Sponsored advertisement"
+        className={
+          showNativeFrame
+            ? `mt-3.5 card-3d w-full rounded-xl bg-white dark:bg-[#0F2018] border border-transparent dark:border-emerald-900/40 overflow-hidden flex items-center justify-center transition-colors duration-200 ${
+                tallAdaptive ? 'min-h-[68px]' : 'min-h-[58px]'
+              }`
+            : 'w-full h-0 overflow-hidden pointer-events-none'
+        }
       >
-        {!nativeAdLoaded && (
-          <div className="w-full rounded-xl bg-white/90 dark:bg-[#0F2018]/90 border border-white/20 dark:border-emerald-900/40 px-4 py-2.5 flex items-center justify-between gap-3 text-xs text-slate-500 dark:text-slate-400">
-            <span className={language === 'ur' ? 'font-urdu' : ''}>
-              {language === 'ur' ? 'سپانسرڈ اشتہار' : 'Sponsored Banner'}
+        {showNativeLoading && (
+          <div className="w-full px-4 py-2.5 flex items-center justify-between gap-3">
+            <span className="text-[11px] font-medium text-slate-400 dark:text-slate-500">
+              {language === 'ur' ? 'اشتہار لوڈ ہو رہا ہے' : 'Loading Ad'}
             </span>
-            <span className="font-mono-tabular text-[11px] text-slate-400 dark:text-slate-500 truncate">
-              {adUnitId}
-            </span>
+            <div className="h-2.5 w-28 rounded-full bg-slate-100 dark:bg-emerald-950/70 animate-pulse" />
           </div>
         )}
       </div>
     );
   }
 
+  const showWebLoading = !webAdFilled && !webAdUnfilled && initialFetchWindow;
+  const showWebContainer = webAdFilled || showWebLoading;
+
   return (
     <div
+      ref={slotRef}
       aria-label="Sponsored advertisement"
-      className="w-full max-w-[420px] lg:max-w-[1140px] mx-auto"
+      className={
+        showWebContainer
+          ? 'mt-3.5 card-3d relative w-full min-h-[60px] rounded-xl bg-white dark:bg-[#0F2018] border border-transparent dark:border-emerald-900/40 px-3 py-2 flex flex-col items-center justify-center overflow-hidden transition-colors duration-200'
+          : 'w-full h-0 overflow-hidden pointer-events-none'
+      }
     >
-      <div className="card-3d relative w-full min-h-[60px] rounded-xl bg-white dark:bg-[#0F2018] border border-transparent dark:border-emerald-900/40 px-3 py-2 flex flex-col items-center justify-center overflow-hidden transition-colors duration-200">
-        <div className="w-full flex items-center justify-between text-[11px] text-slate-400 dark:text-slate-500 mb-0.5">
-          <span>
-            {language === 'ur' ? 'اشتہار · Sponsored' : 'Sponsored Ad'}
+      <ins
+        ref={insRef}
+        className="adsbygoogle block w-full min-h-[50px] max-h-[90px] text-center"
+        data-ad-client={adClient}
+        data-ad-slot={adSlot}
+        data-ad-format="horizontal"
+        data-full-width-responsive="true"
+      />
+
+      {showWebLoading && (
+        <div className="pointer-events-none absolute inset-0 px-4 flex items-center justify-between gap-3 bg-white dark:bg-[#0F2018]">
+          <span className="text-[11px] font-medium text-slate-400 dark:text-slate-500">
+            {language === 'ur' ? 'اشتہار لوڈ ہو رہا ہے' : 'Loading Ad'}
           </span>
-          <span className="font-mono-tabular truncate max-w-[220px]">
-            AdMob · {adSlot}
-          </span>
+          <div className="h-2.5 w-28 rounded-full bg-slate-100 dark:bg-emerald-950/70 animate-pulse" />
         </div>
-
-        <ins
-          className="adsbygoogle block w-full min-h-[50px] max-h-[90px] text-center"
-          data-ad-client={adClient}
-          data-ad-slot={adSlot}
-          data-ad-format="horizontal"
-          data-full-width-responsive="true"
-        />
-
-        {!webAdReady && (
-          <div className="pointer-events-none py-1 text-center text-xs text-slate-500 dark:text-slate-400">
-            <span className="font-medium text-[#15803D] dark:text-emerald-400">
-              SKP VPN Free Global Access
-            </span>
-            <span aria-hidden="true"> · </span>
-            <span className="font-mono-tabular text-[11px]">{adUnitId}</span>
-          </div>
-        )}
-      </div>
+      )}
     </div>
   );
 };

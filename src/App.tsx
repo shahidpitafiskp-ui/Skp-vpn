@@ -350,6 +350,10 @@ export default function App() {
   const [otaErrorCode, setOtaErrorCode] = useState<string>('');
   const [otaGithubRepo, setOtaGithubRepo] = useState<string>('');
   const [bannerAdLoaded, setBannerAdLoaded] = useState<boolean>(false);
+  const [bannerAdHeightDp, setBannerAdHeightDp] = useState<number>(54);
+  const [bannerAdStatus, setBannerAdStatus] = useState<
+    'idle' | 'loading' | 'loaded' | 'no_fill'
+  >('idle');
   const [initialRenderComplete, setInitialRenderComplete] =
     useState<boolean>(false);
 
@@ -567,6 +571,12 @@ export default function App() {
         setOtaGithubRepo(payload.githubRepo);
       if (typeof payload.bannerAdLoaded === 'boolean')
         setBannerAdLoaded(payload.bannerAdLoaded);
+      if (
+        typeof payload.bannerAdHeightDp === 'number' &&
+        payload.bannerAdHeightDp > 0
+      )
+        setBannerAdHeightDp(payload.bannerAdHeightDp);
+      if (payload.bannerAdStatus) setBannerAdStatus(payload.bannerAdStatus);
 
       if (payload.serverId) {
         const matched = SERVER_LOCATIONS.find((s) => s.id === payload.serverId);
@@ -1537,8 +1547,9 @@ export default function App() {
                 </div>
               )}
 
-              {/* Primary Connection Card */}
-              <div className="card-3d bg-white dark:bg-[#0F2018] rounded-xl shadow-sm border border-transparent dark:border-emerald-900/40 px-5 pt-6 pb-5 flex flex-col items-center transition-colors duration-200">
+              <div className="w-full">
+                {/* Primary Connection Card */}
+                <div className="card-3d bg-white dark:bg-[#0F2018] rounded-xl shadow-sm border border-transparent dark:border-emerald-900/40 px-5 pt-6 pb-5 flex flex-col items-center transition-colors duration-200">
                 {/* Emerald Rounded Server Selector Button (shows actual connected server + flag when Auto-Select connects!) */}
                 <button
                   type="button"
@@ -1749,14 +1760,35 @@ export default function App() {
                     </div>
                   )}
 
-                {/* Static "Free Unlimited" Label */}
-                <div
-                  className={`mt-2.5 text-[16px] font-medium text-[#15803D] dark:text-emerald-400 ${
-                    language === 'ur' ? 'font-urdu' : 'font-display-3d-emerald'
-                  }`}
-                >
-                  {t.freeLabel}
+                  {/* Static "Free Unlimited" Label */}
+                  <div
+                    className={`mt-2.5 text-[16px] font-medium text-[#15803D] dark:text-emerald-400 ${
+                      language === 'ur' ? 'font-urdu' : 'font-display-3d-emerald'
+                    }`}
+                  >
+                    {t.freeLabel}
+                  </div>
                 </div>
+
+                {/* Lazy-Loaded Banner Ad (Below Connect Button Card, Above Speed Test Card) */}
+                {initialRenderComplete && (
+                  <Suspense fallback={null}>
+                    <LazyFooterBannerAd
+                      adUnitId={FOOTER_ADMOB_UNIT_ID}
+                      language={language}
+                      overlayOpen={
+                        drawerOpen ||
+                        serverModalOpen ||
+                        supportModalOpen ||
+                        speedModalOpen ||
+                        updatesModalOpen
+                      }
+                      nativeAdLoaded={bannerAdLoaded}
+                      nativeAdHeightDp={bannerAdHeightDp}
+                      nativeAdStatus={bannerAdStatus}
+                    />
+                  </Suspense>
+                )}
               </div>
 
               {/* Inline Fast Internet Speed Check Card */}
@@ -2039,26 +2071,6 @@ export default function App() {
           </section>
         </div>
       </main>
-
-      {/* Deferred Bottom Footer Banner Ad (Mounts only after initial UI render completes) */}
-      <footer className="w-full px-4 pb-4 pt-1 mt-auto">
-        {initialRenderComplete && (
-          <Suspense fallback={null}>
-            <LazyFooterBannerAd
-              adUnitId={FOOTER_ADMOB_UNIT_ID}
-              language={language}
-              overlayOpen={
-                drawerOpen ||
-                serverModalOpen ||
-                supportModalOpen ||
-                speedModalOpen ||
-                updatesModalOpen
-              }
-              nativeAdLoaded={bannerAdLoaded}
-            />
-          </Suspense>
-        )}
-      </footer>
 
       {/* Modals & Drawers */}
       <DrawerMenu

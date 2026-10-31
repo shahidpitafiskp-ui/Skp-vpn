@@ -5,6 +5,9 @@ import android.content.Intent;
 import android.content.pm.PackageManager;
 import android.os.Build;
 import android.os.Bundle;
+import android.os.Handler;
+import android.os.Looper;
+import android.util.DisplayMetrics;
 import android.view.Gravity;
 import android.view.View;
 import android.view.ViewGroup;
@@ -26,11 +29,27 @@ public class MainActivity extends BridgeActivity {
     private static final int NOTIFICATION_PERMISSION_REQUEST_CODE = 7911;
     private static final String DEFAULT_BANNER_AD_UNIT_ID = "ca-app-pub-9297540107285222/7061748625";
 
+    private final Handler mainHandler = new Handler(Looper.getMainLooper());
     private SkpVpnBridge vpnBridge;
-    private boolean mobileAdsInitialized = false;
+
+    private boolean mobileAdsInitStarted = false;
+    private boolean mobileAdsReady = false;
     private FrameLayout bannerAdContainer;
-    private AdView bottomAdView;
+    private AdView inlineAdView;
     private String activeBannerUnitId = "";
+    private boolean adLoaded = false;
+    private boolean adLoadingInFlight = false;
+    private boolean slotRequestedVisible = false;
+    private float lastXCssPx = 0f;
+    private float lastYCssPx = 0f;
+    private float lastWidthCssPx = 320f;
+    private int adRetryCount = 0;
+
+    private final Runnable retryLoadRunnable = () -> {
+        if (!isFinishing() && !isDestroyed() && !adLoaded) {
+            triggerBannerAdLoad();
+        }
+    };
 
     @Override
     public void onCreate(Bundle savedInstanceState) {
@@ -58,11 +77,270 @@ public class MainActivity extends BridgeActivity {
         vpnBridge.checkForOtaUpdateAsync(false);
     }
 
+    private void ensureMobileAdsInitialized() {
+        if (mobileAdsInitStarted) {
+            return;
+        }
+        mobileAdsInitStarted = true;
+        try {
+            MobileAds.initialize(getApplicationContext(), initializationStatus -> {
+                mainHandler.post(() -> {
+                    mobileAdsReady = true;
+                    if (!adLoaded && !adLoadingInFlight && inlineAdView != null) {
+                        triggerBannerAdLoad();
+                    }
+                });
+            });
+            // Safety fallback if GMS callback takes longer than 2.2s on custom ROMs
+            mainHandler.postDelayed(() -> {
+                if (!mobileAdsReady) {
+                    mobileAdsReady = true;
+                    if (!adLoaded && !adLoadingInFlight && inlineAdView != null) {
+                        triggerBannerAdLoad();
+                    }
+                }
+            }, 2200L);
+        } catch (Throwable ignored) {
+            mobileAdsReady = true;
+        }
+    }
+
+    private AdSize resolveInlineBannerAdSize(float widthCssPx) {
+        try {
+            DisplayMetrics dm = getResources().getDisplayMetrics();
+            int screenWidthDp = Math.max(300, Math.round(dm.widthPixels / dm.density));
+            int requestedDp = widthCssPx > 0 ? Math.round(widthCssPx) : (screenWidthDp - 28);
+            int adWidthDp = Math.max(280, Math.min(screenWidthDp, requestedDp));
+            return AdSize.getCurrentOrientationAnchoredAdaptiveBannerAdSize(this, adWidthDp);
+        } catch (Throwable ignored) {
+            return AdSize.BANNER;
+        }
+    }
+
+    private void triggerBannerAdLoad() {
+        try {
+            if (inlineAdView == null || adLoadingInFlight) {
+                return;
+            }
+            adLoadingInFlight = true;
+            if (vpnBridge != null && !adLoaded) {
+                vpnBridge.setBannerAdState(false, 0, "loading");
+            }
+            if (bannerAdContainer != null && !adLoaded) {
+                // Keep non-GONE bounds so Google Mobile Ads SDK measures valid width/height while invisible
+                bannerAdContainer.setVisibility(View.INVISIBLE);
+            }
+            inlineAdView.loadAd(new AdRequest.Builder().build());
+        } catch (Throwable ignored) {
+            adLoadingInFlight = false;
+            if (vpnBridge != null) {
+                vpnBridge.setBannerAdState(false, 0, "no_fill");
+            }
+        }
+    }
+
+    private void applyBannerCoordinates() {
+        if (bannerAdContainer == null) {
+            return;
+        }
+        try {
+            ViewGroup rootContent = findViewById(android.R.id.content);
+            if (rootContent == null) {
+                return;
+            }
+            DisplayMetrics dm = getResources().getDisplayMetrics();
+            float density = dm.density > 0 ? dm.density : 1f;
+
+            int[] webLoc = new int[2];
+            int[] rootLoc = new int[2];
+            WebView webView = (getBridge() != null) ? getBridge().getWebView() : null;
+            if (webView != null) {
+                webView.getLocationOnScreen(webLoc);
+            }
+            rootContent.getLocationOnScreen(rootLoc);
+
+            int offsetX = (webView != null) ? (webLoc[0] - rootLoc[0]) : 0;
+            int offsetY = (webView != null) ? (webLoc[1] - rootLoc[1]) : 0;
+
+            int targetWidthPx = Math.max(Math.round(280f * density), Math.round(lastWidthCssPx * density));
+            ViewGroup.LayoutParams lp = bannerAdContainer.getLayoutParams();
+            if (lp != null && lp.width != targetWidthPx) {
+                lp.width = targetWidthPx;
+                bannerAdContainer.setLayoutParams(lp);
+            }
+
+            float targetLeftPx = offsetX + (lastXCssPx * density);
+            float targetTopPx = offsetY + (lastYCssPx * density);
+            bannerAdContainer.setTranslationX(targetLeftPx);
+            bannerAdContainer.setTranslationY(targetTopPx);
+
+            if (adLoaded && slotRequestedVisible) {
+                bannerAdContainer.setVisibility(View.VISIBLE);
+            } else if (adLoadingInFlight) {
+                bannerAdContainer.setVisibility(View.INVISIBLE);
+            } else {
+                bannerAdContainer.setVisibility(View.GONE);
+            }
+        } catch (Throwable ignored) {
+        }
+    }
+
+    public void updateBottomBannerAd(final String requestedUnitId, final boolean visible) {
+        DisplayMetrics dm = getResources().getDisplayMetrics();
+        float density = dm.density > 0 ? dm.density : 1f;
+        float fallbackWidthDp = Math.max(300f, (dm.widthPixels / density) - 28f);
+        float fallbackYDp = Math.max(240f, (dm.heightPixels / density) - 180f);
+        updateInlineBannerAd(requestedUnitId, 14f, fallbackYDp, fallbackWidthDp, visible);
+    }
+
+    public void updateInlineBannerAd(
+        final String requestedUnitId,
+        final float xCssPx,
+        final float yCssPx,
+        final float widthCssPx,
+        final boolean visible
+    ) {
+        runOnUiThread(() -> {
+            try {
+                slotRequestedVisible = visible;
+                if (widthCssPx > 0) {
+                    lastXCssPx = xCssPx;
+                    lastYCssPx = yCssPx;
+                    lastWidthCssPx = widthCssPx;
+                }
+
+                final String unitId = (requestedUnitId != null && requestedUnitId.contains("/"))
+                    ? requestedUnitId.trim()
+                    : DEFAULT_BANNER_AD_UNIT_ID;
+
+                ensureMobileAdsInitialized();
+
+                ViewGroup rootContent = findViewById(android.R.id.content);
+                if (rootContent == null) {
+                    return;
+                }
+
+                DisplayMetrics dm = getResources().getDisplayMetrics();
+                float density = dm.density > 0 ? dm.density : 1f;
+                int initialWidthPx = Math.max(Math.round(280f * density), Math.round(lastWidthCssPx * density));
+
+                if (bannerAdContainer == null) {
+                    bannerAdContainer = new FrameLayout(this);
+                    bannerAdContainer.setClipChildren(false);
+                    FrameLayout.LayoutParams params = new FrameLayout.LayoutParams(
+                        initialWidthPx,
+                        ViewGroup.LayoutParams.WRAP_CONTENT,
+                        Gravity.TOP | Gravity.START
+                    );
+                    rootContent.addView(bannerAdContainer, params);
+                }
+
+                if (inlineAdView == null || !unitId.equals(activeBannerUnitId)) {
+                    if (inlineAdView != null) {
+                        try {
+                            bannerAdContainer.removeView(inlineAdView);
+                            inlineAdView.destroy();
+                        } catch (Throwable ignored) {
+                        }
+                    }
+
+                    activeBannerUnitId = unitId;
+                    adLoaded = false;
+                    adLoadingInFlight = false;
+                    adRetryCount = 0;
+
+                    inlineAdView = new AdView(this);
+                    AdSize adSize = resolveInlineBannerAdSize(lastWidthCssPx);
+                    inlineAdView.setAdSize(adSize);
+                    inlineAdView.setAdUnitId(unitId);
+                    inlineAdView.setAdListener(new AdListener() {
+                        @Override
+                        public void onAdLoaded() {
+                            adLoadingInFlight = false;
+                            adLoaded = true;
+                            adRetryCount = 0;
+                            mainHandler.removeCallbacks(retryLoadRunnable);
+
+                            int heightDp = 54;
+                            try {
+                                AdSize loadedSize = inlineAdView != null ? inlineAdView.getAdSize() : null;
+                                if (loadedSize != null) {
+                                    float d = getResources().getDisplayMetrics().density;
+                                    int px = loadedSize.getHeightInPixels(MainActivity.this);
+                                    if (px > 0 && d > 0) {
+                                        heightDp = Math.max(50, Math.round(px / d));
+                                    }
+                                }
+                            } catch (Throwable ignored) {
+                            }
+
+                            if (vpnBridge != null) {
+                                vpnBridge.setBannerAdState(true, heightDp, "loaded");
+                            }
+                            applyBannerCoordinates();
+                        }
+
+                        @Override
+                        public void onAdFailedToLoad(@NonNull LoadAdError loadAdError) {
+                            adLoadingInFlight = false;
+                            adLoaded = false;
+                            if (vpnBridge != null) {
+                                vpnBridge.setBannerAdState(false, 0, "no_fill");
+                            }
+                            applyBannerCoordinates();
+
+                            long[] delaysMs = new long[]{12000L, 25000L, 45000L};
+                            long delay = delaysMs[Math.min(adRetryCount, delaysMs.length - 1)];
+                            adRetryCount++;
+                            mainHandler.removeCallbacks(retryLoadRunnable);
+                            mainHandler.postDelayed(retryLoadRunnable, delay);
+                        }
+                    });
+
+                    FrameLayout.LayoutParams adParams = new FrameLayout.LayoutParams(
+                        ViewGroup.LayoutParams.WRAP_CONTENT,
+                        ViewGroup.LayoutParams.WRAP_CONTENT,
+                        Gravity.CENTER
+                    );
+                    bannerAdContainer.addView(inlineAdView, adParams);
+                    applyBannerCoordinates();
+
+                    if (mobileAdsReady) {
+                        triggerBannerAdLoad();
+                    }
+                } else {
+                    applyBannerCoordinates();
+                    if (visible && adLoaded) {
+                        inlineAdView.resume();
+                    } else if (!visible && adLoaded) {
+                        inlineAdView.pause();
+                    } else if (visible && !adLoaded && !adLoadingInFlight && mobileAdsReady) {
+                        triggerBannerAdLoad();
+                    }
+                }
+            } catch (Throwable ignored) {
+                adLoadingInFlight = false;
+                if (vpnBridge != null) {
+                    vpnBridge.setBannerAdState(false, 0, "no_fill");
+                }
+            }
+        });
+    }
+
+    public void retryBannerAdIfNeeded() {
+        runOnUiThread(() -> {
+            if (!adLoaded && !adLoadingInFlight && inlineAdView != null && mobileAdsReady) {
+                mainHandler.removeCallbacks(retryLoadRunnable);
+                triggerBannerAdLoad();
+            }
+        });
+    }
+
     @Override
     public void onPause() {
         try {
-            if (bottomAdView != null) {
-                bottomAdView.pause();
+            if (inlineAdView != null) {
+                inlineAdView.pause();
             }
         } catch (Throwable ignored) {
         }
@@ -80,8 +358,12 @@ public class MainActivity extends BridgeActivity {
             vpnBridge.checkForOtaUpdateAsync(false);
         }
         try {
-            if (bottomAdView != null && bannerAdContainer != null && bannerAdContainer.getVisibility() == View.VISIBLE) {
-                bottomAdView.resume();
+            if (inlineAdView != null) {
+                if (adLoaded && slotRequestedVisible) {
+                    inlineAdView.resume();
+                } else if (!adLoaded && !adLoadingInFlight && mobileAdsReady) {
+                    triggerBannerAdLoad();
+                }
             }
         } catch (Throwable ignored) {
         }
@@ -89,104 +371,16 @@ public class MainActivity extends BridgeActivity {
 
     @Override
     public void onDestroy() {
+        mainHandler.removeCallbacks(retryLoadRunnable);
         try {
-            if (bottomAdView != null) {
-                bottomAdView.destroy();
-                bottomAdView = null;
+            if (inlineAdView != null) {
+                inlineAdView.destroy();
+                inlineAdView = null;
             }
             bannerAdContainer = null;
         } catch (Throwable ignored) {
         }
         super.onDestroy();
-    }
-
-    public void updateBottomBannerAd(final String requestedUnitId, final boolean visible) {
-        runOnUiThread(() -> {
-            try {
-                if (!visible) {
-                    if (bannerAdContainer != null) {
-                        bannerAdContainer.setVisibility(View.GONE);
-                    }
-                    if (bottomAdView != null) {
-                        bottomAdView.pause();
-                    }
-                    return;
-                }
-
-                final String unitId = (requestedUnitId != null && requestedUnitId.contains("/"))
-                    ? requestedUnitId.trim()
-                    : DEFAULT_BANNER_AD_UNIT_ID;
-
-                if (!mobileAdsInitialized) {
-                    mobileAdsInitialized = true;
-                    MobileAds.initialize(getApplicationContext(), initializationStatus -> {});
-                }
-
-                ViewGroup rootContent = findViewById(android.R.id.content);
-                if (rootContent == null) {
-                    return;
-                }
-
-                if (bannerAdContainer == null) {
-                    bannerAdContainer = new FrameLayout(this);
-                    FrameLayout.LayoutParams params = new FrameLayout.LayoutParams(
-                        ViewGroup.LayoutParams.MATCH_PARENT,
-                        ViewGroup.LayoutParams.WRAP_CONTENT,
-                        Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL
-                    );
-                    rootContent.addView(bannerAdContainer, params);
-                }
-
-                if (bottomAdView == null || !unitId.equals(activeBannerUnitId)) {
-                    if (bottomAdView != null) {
-                        try {
-                            bannerAdContainer.removeView(bottomAdView);
-                            bottomAdView.destroy();
-                        } catch (Throwable ignored) {
-                        }
-                    }
-
-                    activeBannerUnitId = unitId;
-                    bottomAdView = new AdView(this);
-                    bottomAdView.setAdSize(AdSize.BANNER);
-                    bottomAdView.setAdUnitId(unitId);
-                    bottomAdView.setAdListener(new AdListener() {
-                        @Override
-                        public void onAdLoaded() {
-                            if (bannerAdContainer != null) {
-                                bannerAdContainer.setVisibility(View.VISIBLE);
-                            }
-                            if (vpnBridge != null) {
-                                vpnBridge.setBannerAdLoaded(true);
-                            }
-                        }
-
-                        @Override
-                        public void onAdFailedToLoad(@NonNull LoadAdError loadAdError) {
-                            if (vpnBridge != null) {
-                                vpnBridge.setBannerAdLoaded(false);
-                            }
-                        }
-                    });
-
-                    FrameLayout.LayoutParams adParams = new FrameLayout.LayoutParams(
-                        ViewGroup.LayoutParams.WRAP_CONTENT,
-                        ViewGroup.LayoutParams.WRAP_CONTENT,
-                        Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL
-                    );
-                    bannerAdContainer.addView(bottomAdView, adParams);
-                    bannerAdContainer.setVisibility(View.VISIBLE);
-                    bottomAdView.loadAd(new AdRequest.Builder().build());
-                } else {
-                    bannerAdContainer.setVisibility(View.VISIBLE);
-                    bottomAdView.resume();
-                }
-            } catch (Throwable ignored) {
-                if (vpnBridge != null) {
-                    vpnBridge.setBannerAdLoaded(false);
-                }
-            }
-        });
     }
 
     public void applyOtaServerBasePath(final String basePath) {

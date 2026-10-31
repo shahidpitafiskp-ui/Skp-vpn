@@ -92,6 +92,8 @@ export interface NativeVpnEventPayload {
   githubRepo?: string;
   installedBuild?: number;
   bannerAdLoaded?: boolean;
+  bannerAdHeightDp?: number;
+  bannerAdStatus?: 'idle' | 'loading' | 'loaded' | 'no_fill';
 }
 
 export interface SessionAlertConfig {
